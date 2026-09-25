@@ -1,0 +1,339 @@
+﻿using UnityEngine;
+using MOBA.Core;
+using MOBA.Data;
+
+namespace MOBA.Components
+{
+    /// <summary>
+    /// 战斗组件：负责"能不能打"和"打出这一下伤害"，不负责"该不该打"。
+    ///
+    /// 职责边界（对应计划书 3.2）：
+    /// 1. 提供攻击距离判定（CanAttack）与一次攻击结算（TryAttack）；
+    /// 2. 不搜索目标（那是 TargetingComponent 的事），不驱动移动（那是 FSM 与 MovementComponent 的事），
+    ///    也不决定攻击节奏的调度时机——由 FSM 的 AttackState 或玩家指令在合适的时候调用 TryAttack；
+    /// 3. 只依赖 ITargetable / IDamageable 接口，因此不关心目标是英雄、小兵还是防御塔。
+    ///
+    /// 运行时状态（nextAttackTime）保存在本组件实例中，绝不写回 AttackData 资产。
+    /// </summary>
+    [DisallowMultipleComponent]
+    public class CombatComponent : MonoBehaviour
+    {
+        [Header("攻击配置")]
+        [Tooltip("普通攻击参数。优先由 EntityBase 从 EntityStatsData.Attack 注入；" +
+                 "若配置资产里没填，则沿用这里在 Inspector 上直接指定的引用。")]
+        [SerializeField] private AttackData attackData;
+
+        [Header("调试")]
+        [Tooltip("在 Console 输出每次成功攻击的伤害信息。")]
+        [SerializeField] private bool logAttackEvents = true;
+
+        [Tooltip("选中该对象时，在 Scene 视图中绘制攻击范围。")]
+        [SerializeField] private bool drawAttackRangeGizmos = true;
+
+        /// <summary>本单位的实体身份入口（原始缓存），请通过 <see cref="Owner"/> 访问。</summary>
+        private EntityBase owner;
+
+        /// <summary>
+        /// 实体身份入口（延迟解析）。
+        /// 为什么要延迟解析：用代码动态创建单位时（MinionSpawner、自动化测试等）组件挂载顺序不可控，
+        /// EntityBase 有可能晚于本组件被 AddComponent，那样 Awake 里缓存到的就是 null 且永远不会更新。
+        /// 这里改成"首次访问时补一次查找"，成功后就一直命中缓存，运行期没有额外开销。
+        /// </summary>
+        private EntityBase Owner
+        {
+            get
+            {
+                if (owner == null)
+                {
+                    owner = GetComponent<EntityBase>();
+                }
+
+                return owner;
+            }
+        }
+
+        /// <summary>索敌组件（可能为 null）。有它时直接复用它内部的敌我规则，避免两处判断不一致。</summary>
+        private TargetingComponent targeting;
+
+        /// <summary>是否已就"缺少 EntityBase"报过错误，防止每次攻击判定都刷日志。</summary>
+        private bool hasReportedMissingOwner;
+
+        /// <summary>是否已就"缺少 AttackData"报过错误。</summary>
+        private bool hasReportedMissingAttackData;
+
+        /// <summary>
+        /// 下次允许攻击的时间点，基准是 Time.time（秒）。
+        /// 用"绝对时间点"而不是"剩余冷却秒数"来存：后者需要每帧递减，一旦组件被禁用就会漏减；
+        /// 前者只需在攻击时写一次，天然不受帧率与启停影响。
+        /// </summary>
+        private float nextAttackTime;
+
+        /// <summary>当前使用的攻击配置（只读），供调试视图与 UI 读取。</summary>
+        public AttackData AttackData => attackData;
+
+        /// <summary>攻击距离（只读）；未配置攻击数据时返回 0，表示无法攻击。</summary>
+        public float AttackRange => attackData != null ? attackData.AttackRange : 0f;
+
+        /// <summary>攻击冷却是否已就绪（只读），供 UI 显示技能可用状态。</summary>
+        public bool IsCooldownReady => Time.time >= nextAttackTime;
+
+        /// <summary>距离下次可攻击还剩多少秒；已就绪返回 0。供技能图标转圈等 UI 使用。</summary>
+        public float CooldownRemaining => Mathf.Max(0f, nextAttackTime - Time.time);
+
+        /// <summary>
+        /// 缓存索敌组件引用（可选依赖，允许为 null）。
+        /// EntityBase 引用不在这里校验，改由 <see cref="Owner"/> 在首次使用时延迟解析并报错——
+        /// 这样既不会对"动态创建、EntityBase 后挂"的合法用法误报，也不会漏掉真正的缺失。
+        /// </summary>
+        private void Awake()
+        {
+            targeting = GetComponent<TargetingComponent>();
+        }
+
+        /// <summary>
+        /// 注入攻击配置。由 EntityBase 在 Start 阶段用 EntityStatsData.Attack 调用。
+        /// 约定：传入 null 时保留 Inspector 上已有的引用（而不是把它清空），
+        /// 这样"配置资产里没填 Attack"的旧预制体仍然可以靠 Inspector 直挂的方式正常工作。
+        /// </summary>
+        /// <param name="data">攻击配置资产，允许为 null。</param>
+        public void Initialize(AttackData data)
+        {
+            if (data == null)
+            {
+                if (attackData == null)
+                {
+                    Debug.LogWarning(
+                        $"[CombatComponent] {name} 未获得有效的 AttackData（配置资产与 Inspector 均为空），该单位无法攻击。", this);
+                }
+                return;
+            }
+
+            attackData = data;
+        }
+
+        /// <summary>
+        /// 判断现在能否对指定目标发起攻击。四个条件全部满足才返回 true：
+        /// 1. 攻击配置存在；2. 目标是存活且可被选中的敌方单位；3. 目标在攻击距离内；4. 攻击冷却已就绪。
+        /// </summary>
+        /// <param name="target">待攻击的目标，允许为 null。</param>
+        /// <returns>可以攻击返回 true。</returns>
+        public bool CanAttack(ITargetable target)
+        {
+            if (attackData == null)
+            {
+                if (!hasReportedMissingAttackData)
+                {
+                    hasReportedMissingAttackData = true;
+                    Debug.LogError($"[CombatComponent] {name} 没有 AttackData，无法攻击。请检查配置。", this);
+                }
+                return false;
+            }
+
+            if (Owner == null)
+            {
+                if (!hasReportedMissingOwner)
+                {
+                    hasReportedMissingOwner = true;
+                    Debug.LogError(
+                        $"[CombatComponent] {name} 上找不到 EntityBase，无法判断敌我，攻击功能不可用。" +
+                        "请确保 EntityBase 与 CombatComponent 挂在同一个 GameObject 上。", this);
+                }
+                return false;
+            }
+
+            // 空引用保护：调用方（FSM / 玩家指令）很可能直接传入 TargetingComponent.CurrentTarget，
+            // 而那个值完全可能是 null，因此这里必须判空而不是依赖调用方。
+            if (target == null)
+            {
+                return false;
+            }
+
+            // 目标 GameObject 可能已被销毁（接口引用不会自动变 null），必须先做存活检查再访问其属性。
+            if (!IsAlive(target))
+            {
+                return false;
+            }
+
+            // 已死亡 / 不可选中的目标不能打——这条也是"死亡后立即停止攻击"的关键闸门。
+            if (!target.IsValidTarget)
+            {
+                return false;
+            }
+
+            // 不能攻击友方：即使调用方绕过了 TargetingComponent 直接传参，这里也会拦住。
+            if (!IsEnemy(target))
+            {
+                return false;
+            }
+
+            if (!IsInAttackRange(target))
+            {
+                return false;
+            }
+
+            return IsCooldownReady;
+        }
+
+        /// <summary>
+        /// 尝试攻击目标：满足 CanAttack 时结算一次伤害并重置冷却。
+        /// </summary>
+        /// <param name="target">攻击目标。</param>
+        /// <returns>本次攻击是否真的打出去了（返回 false 表示条件不满足，未造成任何伤害）。</returns>
+        public bool TryAttack(ITargetable target)
+        {
+            if (!CanAttack(target))
+            {
+                return false;
+            }
+
+            // 【顺序很关键】解析承伤方 → 二次校验 → 重置冷却 → 结算伤害。三步都不能调换：
+            //
+            // 1. 先解析 IDamageable 并做"鞭尸"二次校验，且必须在写冷却【之前】返回。
+            //    原因：CanAttack 判断的是 ITargetable 实现方的 IsValidTarget，而真正承伤的可能是另一个组件
+            //    （本项目 ITargetable 由 EntityBase 实现、IDamageable 由 HealthComponent 实现）。
+            //    若把冷却写在前面，一次"打不出去"的调用会白吃一个攻击间隔，
+            //    验收时表现为"实际攻击间隔比 AttackData 配置值长"。
+            //
+            // 2. 冷却必须在 TakeDamage 之前写入：TakeDamage 会同步触发 OnDied，
+            //    监听方（控制器 / UI）可能在回调里立刻再次尝试攻击（例如"目标死了就换下一个打"），
+            //    若冷却写在伤害之后，那次重入会看到"冷却已就绪"而在同一帧再打一发。
+            IDamageable damageable = ResolveDamageable(target);
+            if (damageable == null)
+            {
+                // 目标实现了 ITargetable 却没有可受伤组件（例如场景里的纯装饰物），属于配置遗漏。
+                Debug.LogWarning($"[CombatComponent] {name} 的目标没有实现 IDamageable，本次伤害未结算。", this);
+                return false;
+            }
+
+            if (damageable.IsDead)
+            {
+                return false;
+            }
+
+            nextAttackTime = Time.time + attackData.AttackInterval;
+
+            if (logAttackEvents)
+            {
+                Debug.Log(
+                    $"[CombatComponent] {name} 攻击 {DescribeTarget(target)}，造成 {attackData.Damage:F1} 点伤害" +
+                    $"（距离 {Vector3.Distance(transform.position, target.TargetTransform.position):F2} / 射程 {attackData.AttackRange:F2}）。", this);
+            }
+
+            // 真正的伤害入口：本组件不关心对方是英雄还是建筑，也不参与扣血细节。
+            damageable.TakeDamage(attackData.Damage);
+            return true;
+        }
+
+        /// <summary>
+        /// 判断目标是否在攻击距离内。
+        /// 当前使用"中心点距离"，适用于体型相近的单位；若后续加入体型差异很大的单位（如基地），
+        /// 应改为按碰撞体/包围盒边缘计算距离，否则会出现"看起来挨着却打不到"的问题。
+        /// </summary>
+        private bool IsInAttackRange(ITargetable target)
+        {
+            Transform targetTransform = target.TargetTransform;
+            if (targetTransform == null)
+            {
+                return false;
+            }
+
+            // 用平方距离比较，省掉一次开方；两种写法等价，仅性能差异。
+            float sqrDistance = (targetTransform.position - transform.position).sqrMagnitude;
+            return sqrDistance <= attackData.AttackRange * attackData.AttackRange;
+        }
+
+        /// <summary>
+        /// 敌我校验。优先复用 TargetingComponent 的规则，保证"能锁定"和"能攻击"用的是同一套判断；
+        /// 没有索敌组件时退化为直接比较阵营，但【中立阵营的排除必须保持一致】——
+        /// 否则会出现"索敌认为不是敌人、攻击却打得出去"的规则分叉（README 2.2：不可攻击中立单位）。
+        /// </summary>
+        private bool IsEnemy(ITargetable target)
+        {
+            if (targeting != null)
+            {
+                return targeting.IsEnemy(target);
+            }
+
+            // 退化路径：无索敌组件时自行判断，规则与 TargetingComponent.IsEnemy 保持逐条对齐。
+            if (target.Team == TeamType.Neutral)
+            {
+                return false;
+            }
+
+            EntityBase resolvedOwner = Owner;
+            return resolvedOwner != null && target.Team != resolvedOwner.Team;
+        }
+
+        /// <summary>
+        /// 从目标身上解析出 IDamageable 实现。
+        /// 本项目里 IDamageable 由 HealthComponent 实现，而 ITargetable 由 EntityBase 实现，
+        /// 两者在同一个 GameObject 上但类型不同，因此不能简单地用 "target as IDamageable"，
+        /// 需要通过组件查找把两者接起来。
+        /// </summary>
+        private static IDamageable ResolveDamageable(ITargetable target)
+        {
+            // 情况一：目标自己就实现了 IDamageable（例如单元测试里的桩对象）。
+            if (target is IDamageable directDamageable)
+            {
+                return directDamageable;
+            }
+
+            // 情况二：目标是一个 Unity 组件（EntityBase），到它所在的物体及其父级上找 IDamageable 实现。
+            if (target is Component targetComponent)
+            {
+                return targetComponent.GetComponentInParent<IDamageable>();
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 判断 ITargetable 引用背后的 Unity 对象是否仍然存活。
+        /// 接口引用在 GameObject 被销毁后不会变成 null，直接访问属性会抛 MissingReferenceException。
+        /// </summary>
+        private static bool IsAlive(ITargetable target)
+        {
+            if (target is UnityEngine.Object unityObject)
+            {
+                return unityObject != null;
+            }
+
+            return true;
+        }
+
+        /// <summary>生成目标的简短描述，仅用于日志。</summary>
+        private static string DescribeTarget(ITargetable target)
+        {
+            if (target is Component component)
+            {
+                return $"{component.name}({target.Team})";
+            }
+
+            return $"ITargetable({target.Team})";
+        }
+
+        /// <summary>
+        /// Scene 视图可视化：绘制攻击范围。
+        /// 与索敌范围对比可以直观发现"看得见却打不着"（攻击距离 &lt; 索敌距离是正常设计，
+        /// 但若攻击距离大于索敌距离，AI 会永远追不上目标）。
+        /// </summary>
+        private void OnDrawGizmosSelected()
+        {
+            if (!drawAttackRangeGizmos || attackData == null)
+            {
+                return;
+            }
+
+            // 橙色线框球 = 攻击距离。
+            Gizmos.color = new Color(1f, 0.6f, 0f, 0.8f);
+            Gizmos.DrawWireSphere(transform.position, attackData.AttackRange);
+
+            // 冷却就绪时额外画一个实心小点，便于在 Scene 视图直接看出"现在能不能打"。
+            if (Application.isPlaying && IsCooldownReady)
+            {
+                Gizmos.color = Color.green;
+                Gizmos.DrawSphere(transform.position + Vector3.up * 0.2f, 0.12f);
+            }
+        }
+    }
+}
