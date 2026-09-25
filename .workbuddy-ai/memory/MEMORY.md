@@ -7,6 +7,11 @@
 - 组件间走公开方法 + C# 事件，禁止跨类改私有字段。第一版不建对象池/技能系统/属性修改器/事件总线。
 
 ## 环境与工具
+- Git：已推送 `origin` = `https://github.com/Jaxuu/MOBA-Demo.git`，分支 **`main`**（不是 master）。
+  `.gitignore` = github/gitignore 官方 Unity 规则 + 追加 `/.codely-cli/`。
+  抓 GitHub 原始文件走 `cdn.jsdelivr.net`（`raw.githubusercontent.com` 直连超时）。
+  **推送必须走 `gh` 凭据通道**（已跑 `gh auth setup-git`）：默认 helper-selector(GCM) 会静默挂起 ~30s，
+  且只报 `failed to push some refs` 无 fatal 行，易误判为网络问题。
 - 团结引擎 Tuanjie 2022.3.61t14。**场景扩展名 `.scene`**（不是 .unity）；主场景 `Assets/Scenes/MainScene.scene`。
 - 无 .NET SDK → 只能静态检查 `python .workbuddy-ai/tools/check_unity_cs.py [--fix-bom]`
   （六项：BOM / 括号配平 / 命名空间归属 / 双引号奇偶 / 危险命名空间末段 / 迭代器内裸 return）。
