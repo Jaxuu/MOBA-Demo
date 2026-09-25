@@ -104,9 +104,13 @@
 - **CD 遮罩**：每帧读 `GetCooldownRemaining`（冷却没有变化事件），**秒数只在整秒跳变时写文本**（否则 60 次/秒 ToString 必顶掉 GC≈0）。`Image.fillMethod` 的 setter **会重置 fillOrigin** → 必须先设 fillMethod 再设 fillOrigin；`Image.Origin360.Top = 2`；`fillClockwise` 默认 true。
 - **击杀统计（D3）**：只统计英雄；归属读 `HealthComponent.LastDamageSource`；`MatchStatsTracker` 是**唯一计数器**（计分板只读它）。`OnDied` 是既有 `Action`（无发送者、不能改签名）→ 统计侧用每单位闭包（死亡低频）；受伤高频所以新事件带发送者以避免闭包。
 - **工具步骤 17**：`AutoSceneBuilder` 已改 `partial` + 拆分册；`ManagedRootNames` 增加 `UIRoot`/`WorldUIRoot`。占位白图 = 运行时生成 4×4 PNG → `TextureImporter` 改 Sprite（**所有 Image 共用一张主贴图才能合批**）；字体三级回退（`LegacyRuntime.ttf` → `Arial.ttf` → 运行期 `UIFontProvider` 系统字体）；`ValidateUISetup` 逐个读 `SerializedObject` 给确定性结论。
+- **小地图（`UI/MinimapView.cs`）**：世界 XZ → 小地图 XY 等比例映射，映射范围取 `ComputeRequiredGroundBounds()`（**与 NavMesh 烘焙同一份包围盒**）；标记复用 `PrefabPool<Image>`（不需要新 View 类）；**显隐每帧读 `entity.Health.IsDead`**（英雄死后不注销，用事件还得补"复活→显示"），天然覆盖"死亡隐藏→复活重现"。
 - **uGUI 的两个静默失效**（必须显式查）：`Text.font == null` 与 `Image.sprite == null` 都**不报错、只是不显示**。
 - **补齐既有缺口**：`MatchResultView` 此前从未被装配进场景 → 步骤 17 现已创建并注入（基地摧毁后屏幕上有结算界面）。
-- ⚠️ **待实机**：本轮只做了静态检查（62 文件七项全绿、using 0 疑点、自测 13/13），**无 .NET SDK → 未经编译**。回编辑器后先跑菜单 `MOBA Demo/一键组装测试战场`，看日志行「UI 与可视化（阶段七）：…」与是否有 `UI 装配存在 N 处问题`。
+- **封版与推送（2026-09-25）**：`MOBA_Demo_Plan.md` 阶段七标记 ✅ [x] 已完成（含交付结果表 + 13 条验收结论 + 4 项裁决 + 已知风险）；`README.md` §7 表与 §1 当前进度同步。commit **`b8a8d54`** 已推送 `main`（**同时把此前从未推送的阶段五提交 `fb4ad8b` 一并带上**）。
+- ⚠️ **推送命令（项目约定）**：`GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c credential.helper='!gh auth git-credential' push origin main`。注意 `git ls-remote` 不带凭据也能成功（仓库可匿名读）→ **不能用它判断推送凭据是否可用**。
+- ⚠️ **验证场景内容的手段**：按工具生成的对象名（`m_Name: UIRoot` 等）与**序列化字段名**（`barTemplate`/`entryTexts`/`panelRoot`/`worldSize`…）反查；**绝不能用脚本 guid 反查**（`.meta` 的 guid 是 base64，与场景里的 32 位十六进制对不上）。
+- ⚠️ **待实机**：小地图需补一次目视确认；Profiler 量化项（≥60FPS / UI 稳态 GC≈0）仍待采样。
 
 ## 白盒期尸体清理（阶段七验收后补丁，2026-09-25）
 - **`Core/EntityVisuals.cs`（新增）**：`SetRenderersEnabled(GameObject, bool)`，用 `GetComponentsInChildren<Renderer>(true)`（基类 Renderer → 覆盖 Mesh/SkinnedMesh/粒子）。**英雄与小兵共用这一个工具**，避免两处各写一遍遍历。
@@ -120,7 +124,7 @@
 ## 状态 / 待办
 - **阶段一~五已封版**（阶段五 commit `2fb7e10`）。两条封版裁决：不做 `SpawnPoint.cs`；相机平移只做中键拖拽（中键双击回中），不做屏幕边缘平移。
 - **阶段六已封版并通过实机验收**。
-- **阶段七代码已全部落地**（7.0~7.8，D1~D10 全按建议执行），**UI 已通过实机验收**；白盒期尸体清理补丁已实装（见上一节），待实机确认。
+- **阶段七已封版并推送到 GitHub**（7.0~7.8，D1~D10 全按建议执行；含小地图、白盒期尸体清理补丁）。commit `b8a8d54` → `origin/main`。**下一步：阶段八（美术表现与表现层分离）**。
 - ⚠️ 待补测：Profiler 白盒稳态 GC Alloc ≤ 1KB/帧、单帧逻辑 < 2ms（风险点：`TargetingComponent.FindNearestEnemy` 用 `OverlapSphere` 每次分配数组 → 换 `OverlapSphereNonAlloc`，`AreaEffectZone` 已有同族范式）。
 - ⚠️ `MainScene.scene` 历史上有"改动只在编辑器内存里"的问题：测出效果后务必 **Ctrl+S 并补一次提交**。
 - `TowerController` 仍"已就位、未挂载"（6B 顺延）；`Assets/Art` 目前只有 `Materials/HeroGreen.mat` 与阶段七新增的 `UI/UIWhite.png`。
