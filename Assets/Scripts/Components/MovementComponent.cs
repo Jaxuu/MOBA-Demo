@@ -23,6 +23,10 @@ namespace MOBA.Components
         [Tooltip("选中该对象时，在 Scene 视图中绘制当前寻路路径与目的地。")]
         [SerializeField] private bool drawPathGizmos = true;
 
+        [Header("运行时状态（只读，仅供 Inspector 观察调试）")]
+        [Tooltip("移动锁。为 true 时拒绝一切新的移动指令并强制停下，由 BuffComponent（眩晕）与 SkillComponent（施法前摇）控制。")]
+        [SerializeField] private bool movementLocked = false;
+
         /// <summary>当前 GameObject 上的寻路代理，由 Awake 缓存。</summary>
         private NavMeshAgent agent;
 
@@ -59,6 +63,40 @@ namespace MOBA.Components
 
         /// <summary>当前帧的实际移动速度向量，供表现层（如 AnimationComponent）判断是否在移动。</summary>
         public Vector3 CurrentVelocity => agent != null ? agent.velocity : Vector3.zero;
+
+        /// <summary>当前是否处于移动锁状态（只读），供调试与测试断言使用。</summary>
+        public bool IsMovementLocked => movementLocked;
+
+        /// <summary>
+        /// 设置移动锁（阶段六新增）。
+        ///
+        /// 【为什么需要它】眩晕与施法前摇都要求"这段时间内不许位移"。若不加这个闸门，
+        /// 就得在每一个下达移动指令的地方（玩家指令层 1 处 + FSM 的 MoveState / ChaseState / AttackState 共 3 处）
+        /// 各写一次"是否被眩晕 / 是否在施法"的判断——漏掉任何一处，就会出现"眩晕中还能被点走"的破绽。
+        /// 闸门放在唯一的移动出口（MoveTo）上，就不可能漏。
+        ///
+        /// 语义：加锁时立即停止当前寻路（清掉残留路径，避免"锁上了但还在滑行"）；
+        /// 解锁时不自动恢复移动——调用方需要重新下达指令，这与 MoveTo 失败后调用方重试的既有约定一致。
+        ///
+        /// 【注意】本锁与"死亡"是两回事：死亡走 HeroController/DeadState 的 agent.enabled = false，
+        /// 那是物理层面的彻底封禁，不经过本锁。
+        /// </summary>
+        /// <param name="locked">true = 锁住移动；false = 解锁。</param>
+        public void SetMovementLocked(bool locked)
+        {
+            if (movementLocked == locked)
+            {
+                return;
+            }
+
+            movementLocked = locked;
+
+            if (locked)
+            {
+                // 加锁即刹车：否则代理会继续沿上一次的目的地滑行到终点，眩晕看起来完全没生效。
+                Stop();
+            }
+        }
 
         /// <summary>
         /// 缓存 NavMeshAgent 引用。
@@ -128,6 +166,15 @@ namespace MOBA.Components
         /// </returns>
         public bool MoveTo(Vector3 destination)
         {
+            // 移动锁闸门放在最前面（先于 agent 判空）：被锁住的单位不应再产生任何寻路行为，
+            // 也不该因为"代理不在 NavMesh 上"而反复刷告警——那会让真正的配置问题被噪声淹没。
+            // 返回 false 且不报错：这是"当前不允许移动"的正常语义，调用方（FSM / 玩家指令）会自然重试，
+            // 锁一解除即可自愈（与 MoveTo 失败重试的既有设计一致）。
+            if (movementLocked)
+            {
+                return false;
+            }
+
             if (agent == null)
             {
                 ReportMissingAgentOnce();

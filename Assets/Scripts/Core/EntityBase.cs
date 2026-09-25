@@ -1,6 +1,7 @@
 ﻿using UnityEngine;
 using MOBA.Components;
 using MOBA.Data;
+using MOBA.Skills;
 
 namespace MOBA.Core
 {
@@ -72,6 +73,18 @@ namespace MOBA.Core
         /// 未挂载时为 null（例如无攻击能力的纯装饰单位），使用前必须判空。
         /// </summary>
         public CombatComponent Combat { get; private set; }
+
+        /// <summary>
+        /// 法力组件引用（阶段六）。公开只读。
+        /// 未挂载时为 null（小兵、防御塔、基地按设计都没有法力），使用前必须判空。
+        /// </summary>
+        public ManaComponent Mana { get; private set; }
+
+        /// <summary>
+        /// 技能组件引用（阶段六）。公开只读。
+        /// 未挂载时为 null（只有英雄有技能），使用前必须判空。
+        /// </summary>
+        public SkillComponent Skills { get; private set; }
 
         #region ITargetable 实现
 
@@ -222,6 +235,10 @@ namespace MOBA.Core
             Health = GetComponent<HealthComponent>();
             Targeting = GetComponent<TargetingComponent>();
             Combat = GetComponent<CombatComponent>();
+
+            // 阶段六新增：法力与技能同样是"允许为空"的可选能力（小兵/建筑没有它们）。
+            Mana = GetComponent<ManaComponent>();
+            Skills = GetComponent<SkillComponent>();
         }
 
         /// <summary>
@@ -341,6 +358,15 @@ namespace MOBA.Core
                     "请确认是否为误挂（基地仅作为胜负判定载体）。", this);
             }
 
+            // 阶段六：只有英雄按设计拥有技能（小兵与建筑无技能是正常配置）。
+            // 因此这里用 Warning 且限定 Hero 类型——若不加类型条件，一场景的小兵都会刷同一条告警。
+            if (Skills == null && entityType == MOBA.Core.EntityType.Hero)
+            {
+                Debug.LogWarning(
+                    $"[EntityBase] {name} 的类型为 Hero，但未挂载 SkillComponent，该英雄无法释放任何技能。" +
+                    "请检查预制体配置（一键组装工具会在英雄预制体上自动挂载并注入 Q/W 配置）。", this);
+            }
+
             // 碰撞体检查：FindNearestEnemy 的实现是 Physics.OverlapSphere + GetComponentInParent<ITargetable>，
             // 因此【没有 Collider 的单位永远不会出现在任何一次索敌结果里】——而且不会抛任何异常，
             // 表现为「敌人就在旁边却互相看不见」，是排查成本最高的一类配置错误。
@@ -420,14 +446,62 @@ namespace MOBA.Core
 
                 Targeting.SetDetectionRadius(detectionRadius);
             }
+
+            // 阶段六：法力与技能。顺序上先法力后技能——SkillComponent 施法时要读 ManaComponent 判蓝量，
+            // 虽然它用的是运行期组件引用（不受注入顺序影响），但让数据流顺序与依赖关系一致，
+            // 排查"为什么技能放不出来"时不必再考虑时序。
+            if (Mana != null)
+            {
+                Mana.Initialize(statsData.MaxMana, statsData.ManaRegenPerSecond);
+            }
+
+            if (Skills != null)
+            {
+                // 与 CombatComponent.Initialize 同一约定：传 null 时保留 Inspector 上直挂的引用，
+                // 而不是把它清空——这样"配置资产里没填技能"的旧预制体仍可靠直挂方式工作。
+                Skills.Initialize(statsData.SkillQ, statsData.SkillW);
+            }
         }
 
         /// <summary>
         /// 编辑器内校验：在 Inspector 修改数值或挂载组件时提示缺失引用，把问题提前暴露在编辑期而不是运行期。
         /// 这里只报 Warning（编辑器提示），运行期的致命问题由 ValidateDependencies 用 LogError 兜底。
+        ///
+        /// 【为什么校验要延迟到编辑器空闲时再执行】
+        /// Unity 在 AddComponent 的【同一瞬间】就会同步调用 OnValidate，而一键组装工具（AutoSceneBuilder）
+        /// 的顺序必然是「先 AddComponent、后注入 statsData」——那一刻 statsData 必然是 null，
+        /// 于是每次组装都会刷出几条「Stats Data 未赋值」的假告警（双方基地 + 英雄预制体各一条），
+        /// 而注入其实在几行之后就完成了。这类假告警比"没有校验"更糟：
+        /// 它会训练使用者忽略 Console，而本项目整套流程都依赖 Console 暴露真实的配置错误。
+        ///
+        /// 因此编辑器下改为挂一个 delayCall：等工具那一整段同步流程走完、注入真正落盘之后再校验。
+        /// 若那时仍为空，说明确实是漏配，告警照常输出——校验能力一点没少，只是不再被瞬时状态误触发。
+        /// 构建后的运行时（非编辑器）没有这个瞬时窗口，直接同步校验即可。
         /// </summary>
         private void OnValidate()
         {
+#if UNITY_EDITOR
+            // 先退订再订阅：在 Inspector 里拖数值会高频触发 OnValidate，
+            // 不去重会堆积出一串重复回调（每个都在下一帧执行一次同样的检查）。
+            UnityEditor.EditorApplication.delayCall -= ValidateStatsDataAssigned;
+            UnityEditor.EditorApplication.delayCall += ValidateStatsDataAssigned;
+#else
+            ValidateStatsDataAssigned();
+#endif
+        }
+
+        /// <summary>
+        /// Stats Data 缺口的实际校验体。
+        /// 编辑器下由 delayCall 调用，可能晚于 OnValidate 若干帧，因此必须自己判空——
+        /// 对象可能在延迟期间被销毁（一键组装工具生成的临时预制体对象正是如此，保存后立刻 DestroyImmediate）。
+        /// </summary>
+        private void ValidateStatsDataAssigned()
+        {
+            if (this == null)
+            {
+                return;
+            }
+
             if (statsData == null)
             {
                 Debug.LogWarning($"[EntityBase] {name} 的 Stats Data 未赋值，运行时将无法完成属性注入。", this);

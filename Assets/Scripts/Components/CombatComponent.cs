@@ -30,6 +30,10 @@ namespace MOBA.Components
         [Tooltip("选中该对象时，在 Scene 视图中绘制攻击范围。")]
         [SerializeField] private bool drawAttackRangeGizmos = true;
 
+        [Header("运行时状态（只读，仅供 Inspector 观察调试）")]
+        [Tooltip("攻击锁。为 true 时一切攻击尝试都被拒绝，由 BuffComponent（眩晕）与 SkillComponent（施法前摇）控制。")]
+        [SerializeField] private bool attackLocked = false;
+
         /// <summary>本单位的实体身份入口（原始缓存），请通过 <see cref="Owner"/> 访问。</summary>
         private EntityBase owner;
 
@@ -80,6 +84,25 @@ namespace MOBA.Components
         /// <summary>距离下次可攻击还剩多少秒；已就绪返回 0。供技能图标转圈等 UI 使用。</summary>
         public float CooldownRemaining => Mathf.Max(0f, nextAttackTime - Time.time);
 
+        /// <summary>当前是否处于攻击锁状态（只读），供调试与测试断言使用。</summary>
+        public bool IsAttackLocked => attackLocked;
+
+        /// <summary>
+        /// 设置攻击锁（阶段六新增）。
+        ///
+        /// 【为什么需要它】与 MovementComponent.SetMovementLocked 完全对称：眩晕与施法前摇都要求"这段时间内不许出手"。
+        /// 若不加闸门，就得在每个调用 TryAttack 的地方（玩家指令层 + FSM 的 AttackState）各判一次状态，
+        /// 而攻击比移动更敏感——一次漏判就表现为"被眩晕的单位还在平A"，是肉眼可见的破绽。
+        ///
+        /// 放在 CanAttack 内部而不是 TryAttack 的入口，是为了让"能否攻击"这个问题的答案只有一处，
+        /// 避免调用方绕过锁直接结算伤害（TryAttack 的第一步就是 CanAttack，因此自动被覆盖）。
+        /// </summary>
+        /// <param name="locked">true = 禁止攻击；false = 恢复。</param>
+        public void SetAttackLocked(bool locked)
+        {
+            attackLocked = locked;
+        }
+
         /// <summary>
         /// 缓存索敌组件引用（可选依赖，允许为 null）。
         /// EntityBase 引用不在这里校验，改由 <see cref="Owner"/> 在首次使用时延迟解析并报错——
@@ -119,6 +142,14 @@ namespace MOBA.Components
         /// <returns>可以攻击返回 true。</returns>
         public bool CanAttack(ITargetable target)
         {
+            // 攻击锁闸门放在最前面：被眩晕或正在施法前摇时，任何目标都不该能打出去。
+            // 返回 false 且不打日志——这是"当前不允许攻击"的正常语义，不是配置错误；
+            // 若在此告警，一次 1 秒的眩晕会刷出几十条无意义日志，把真正的配置问题淹没。
+            if (attackLocked)
+            {
+                return false;
+            }
+
             if (attackData == null)
             {
                 if (!hasReportedMissingAttackData)

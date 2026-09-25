@@ -17,6 +17,10 @@ Unity C# 脚本静态校验工具（本机无 .NET SDK，无法编译，故用�
   6. 迭代器内的裸 return：返回 IEnumerator/IEnumerable 的方法体内若出现不带值的 `return;`，
      会报 CS1622（迭代器块内只能用 yield break 结束迭代）。本项目已踩过一次——
      写协程时顺手写了 `return;`，Unity 编译直接失败，而前五项检查全部通过、毫无察觉。
+  7. 中文出现在注释与字符串之外：C# 标识符全是 ASCII，因此剥离注释与字符串后若还剩下中文字符，
+     说明某个字符串字面量被提前闭合（典型写法：在 "……" 里又写了一对英文双引号）。
+     这一类错误【前六项全都查不出来】：引号总数仍是偶数、括号仍然配平、命名空间也没问题，
+     但编译器会报 CS1002/CS1026 等成片语法错误。第 7 项就是为补这个盲区而加。
 
 注意：本脚本只能发现"结构性"问题，无法替代编译。类型/成员是否存在仍需人工交叉核对。
 """
@@ -66,10 +70,23 @@ def expected_namespace(rel_dir):
 
 
 def strip_comments_and_strings(text):
-    """把注释与字符串字面量替换为等长空白，保证括号计数不受其内容影响。"""
+    """把注释与字符串字面量替换为等长空白，保证括号计数不受其内容影响。
+
+    【必须支持插值字符串的"洞"】C# 允许在 $"{...}" 的洞里再写字符串字面量，例如
+        Debug.Log($"{(pass ? "全部通过" : "存在失败项")}");
+    这在语法上完全合法（嵌套的双引号属于洞内的代码，不是外层字符串的结束）。
+    若剥离器不识别洞，就会把洞内第一个 " 当成外层字符串的结束，此后整份文件的
+    注释/字符串边界全部错位——本项目的第 7 项检查首次上线时，正是因为这一点
+    把 Stage2AutoTester / AutoSceneBuilder 里合法的嵌套写法误报成了"字符串被截断"。
+
+    实现方式：遇到 $" 进入 interp 状态；遇到未转义的 { 时把 interp 压栈、切回代码状态，
+    并开始统计洞内的花括号深度；当深度回到 0 时弹栈、回到 interp 状态继续消费字符串内容。
+    """
     out = []
     i, n = 0, len(text)
-    state = None  # None / 'line' / 'block' / 'str' / 'char' / 'verbatim'
+    state = None  # None / 'line' / 'block' / 'str' / 'char' / 'verbatim' / 'interp'
+    string_stack = []  # 插值洞的返回栈：每进入一个洞压入 'interp'
+    hole_brace_depth = []  # 每个洞内部的花括号深度（洞内可能再写 lambda / 初始化器）
     while i < n:
         c = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
@@ -80,11 +97,38 @@ def strip_comments_and_strings(text):
                 state = "block"; out.append("  "); i += 2; continue
             if c == "@" and nxt == '"':
                 state = "verbatim"; out.append("  "); i += 2; continue
+            if c == "$" and nxt == '"':
+                state = "interp"; out.append("  "); i += 2; continue
             if c == '"':
                 state = "str"; out.append(" "); i += 1; continue
             if c == "'":
                 state = "char"; out.append(" "); i += 1; continue
+            # 洞内的花括号配平：深度归零即表示洞结束，回到外层字符串。
+            if c == "{" and hole_brace_depth:
+                hole_brace_depth[-1] += 1
+            elif c == "}" and hole_brace_depth:
+                if hole_brace_depth[-1] > 0:
+                    hole_brace_depth[-1] -= 1
+                else:
+                    hole_brace_depth.pop()
+                    state = string_stack.pop()
+                    out.append(" "); i += 1; continue
             out.append(c); i += 1; continue
+        if state == "interp":
+            if c == "\\":
+                out.append("  "); i += 2; continue
+            if c == '"':
+                state = None; out.append(" "); i += 1; continue
+            if c == "{":
+                if nxt == "{":
+                    out.append("  "); i += 2; continue  # {{ 是转义花括号，不构成洞
+                string_stack.append("interp")
+                hole_brace_depth.append(0)
+                state = None
+                out.append(" "); i += 1; continue
+            if c == "}" and nxt == "}":
+                out.append("  "); i += 2; continue  # }} 是转义花括号
+            out.append("\n" if c == "\n" else " "); i += 1; continue
         if state == "line":
             if c == "\n":
                 state = None; out.append("\n")
@@ -163,6 +207,70 @@ def check_iterator_bare_return(stripped, text, rel):
     return problems
 
 
+# 中文字符（含中文标点与全角符号）。C# 的标识符全是 ASCII，因此剥离注释与字符串后
+# 若还剩下这些字符，一定是某个字符串字面量被提前闭合了。
+CJK_RE = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]")
+
+# 单个文件最多报告几处"中文出现在字符串之外"。一处错误往往会连带出好几行，
+# 全报出来会把真正的问题淹掉，前 3 处足以定位。
+MAX_CJK_REPORTS_PER_FILE = 3
+
+
+def check_cjk_outside_literals(stripped, text, rel):
+    """
+    检查"中文出现在注释与字符串之外"（第 7 项）。
+
+    为什么必须单独查这一条：它是最典型的"检查全绿、编译全红"的一类错误。
+    在 C# 字符串里再写一对英文双引号，例如把
+        "非指向性技能的落点将退回"射线与地面平面的交点"计算"
+    写进 Debug.LogWarning，结果是字符串被切成三段、中间那段变成一个中文标识符：
+      · 引号总数仍是偶数（4 个）——第 4 项查不出来；
+      · 括号仍然配平——第 2 项查不出来；
+      · 命名空间、BOM、迭代器 return 也都正常。
+    但编译器会报 CS1002 / CS1026 等成片语法错误，而错误行号指向的是"字符串那一行"，
+    排查时很容易怀疑到完全无关的地方。
+
+    判定手段：用 strip_comments_and_strings 把注释与字符串都替换成空白后，
+    正文里不应该再出现任何中文字符。出现即为漏网的字符串内容。
+
+    【必须排除预处理器指令行】`#region 状态跳转阈值` 这类写法是合法 C#——
+    预处理指令后的文字是自由文本，既不是注释也不是字符串，中文出现在那里完全正常。
+    若不排除，本项目里 8 个文件的 #region 中文名会全部被误报（首次上线本检查时就是这么踩的）。
+    """
+    problems = []
+    reported_lines = set()
+
+    # 预处理器指令所在的行号集合（1 基）。这些行整行跳过。
+    preprocessor_lines = set()
+    for index, raw_line in enumerate(text.split("\n")):
+        if raw_line.lstrip().startswith("#"):
+            preprocessor_lines.add(index + 1)
+
+    for match in CJK_RE.finditer(stripped):
+        offset = match.start()
+        line = text.count("\n", 0, offset) + 1
+
+        if line in preprocessor_lines:
+            continue
+
+        # 同一行只报一次：一处字符串被截断会让该行之后的所有中文都"越界"，
+        # 逐个字符报出来会瞬间刷屏，反而看不到真正出问题的那一行。
+        if line in reported_lines:
+            continue
+
+        reported_lines.add(line)
+        problems.append(
+            "%s:%d: 中文字符 '%s' 出现在注释与字符串之外，说明上方某个字符串字面量被提前闭合"
+            "（检查该行附近是否在中文说明里误用了英文双引号，应改用「」）"
+            % (rel, line, match.group()))
+
+        if len(problems) >= MAX_CJK_REPORTS_PER_FILE:
+            problems.append("%s: （本文件还有更多同类问题，已截断，请修复后重跑）" % rel)
+            break
+
+    return problems
+
+
 def main():
     fix_bom = "--fix-bom" in sys.argv
     problems = []
@@ -223,6 +331,9 @@ def main():
             # 迭代器内的裸 return（CS1622）：同样是本项目踩过的真实事故。
             problems.extend(check_iterator_bare_return(stripped, text, rel))
 
+            # 中文出现在注释与字符串之外：字符串被提前闭合的可靠信号（第 7 项）。
+            problems.extend(check_cjk_outside_literals(stripped, text, rel))
+
     print("已检查 %d 个 .cs 文件（根目录：%s）" % (checked, SRC_ROOT))
     if problems:
         print("\n发现 %d 个问题：" % len(problems))
@@ -230,7 +341,7 @@ def main():
             print("  - " + p)
         return 1
 
-    print("结构检查全部通过（BOM / 括号配平 / 命名空间归属 / 双引号奇偶 / 危险命名空间 / 迭代器 return）。")
+    print("结构检查全部通过（BOM / 括号配平 / 命名空间归属 / 双引号奇偶 / 危险命名空间 / 迭代器 return / 中文越界）。")
     print("提醒：本脚本无法替代编译，类型与成员是否存在仍需人工核对。")
     return 0
 

@@ -15,8 +15,13 @@ GameObject:
   - component: {fileID: 8779447972538078450}
   - component: {fileID: 2923401258697387326}
   - component: {fileID: 8639252960947540097}
+  - component: {fileID: 5917276290060360068}
+  - component: {fileID: 4221778968921556752}
+  - component: {fileID: 1399721446264363885}
+  - component: {fileID: 5306362140962538019}
   - component: {fileID: 3359753580412422499}
   - component: {fileID: 8374300092937071247}
+  - component: {fileID: 5244274147053700043}
   m_Layer: 0
   m_HasEditorInfo: 1
   m_Name: HeroPrefab
@@ -94,6 +99,7 @@ MonoBehaviour:
   defaultMaxHealth: 100
   maxHealth: 100
   currentHealth: 100
+  currentShield: 0
   logHealthChanges: 0
 --- !u!114 &8779447972538078450
 MonoBehaviour:
@@ -128,6 +134,7 @@ MonoBehaviour:
   attackData: {fileID: 11400000, guid: 6d5f925fc3b512940ad5f92a969797e3, type: 2}
   logAttackEvents: 1
   drawAttackRangeGizmos: 1
+  attackLocked: 0
 --- !u!114 &8639252960947540097
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -141,6 +148,78 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   drawPathGizmos: 1
+  movementLocked: 0
+--- !u!114 &5917276290060360068
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 52247f0543a1a914ea2a7a6b4dac9bd9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  defaultMaxMana: 300
+  maxMana: 300
+  currentMana: 300
+  regenPerSecond: 0
+  logManaChanges: 0
+--- !u!114 &4221778968921556752
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2861b6cd048e30c47892798bbaa8d9c4, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  logBuffEvents: 0
+  slowed: 0
+  slowPercent: 0
+  slowEndTime: 0
+  stunned: 0
+  stunEndTime: 0
+  shieldActive: 0
+  shieldEndTime: 0
+  baseSpeed: 0
+--- !u!114 &1399721446264363885
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 65e9a2db456d28145ade4fa5ba58e8dc, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  skillQ: {fileID: 11400000, guid: fe3adf32fb99e3946ba78f5664ed2206, type: 2}
+  skillW: {fileID: 11400000, guid: 14e4c142f715b5242b406b154c019775, type: 2}
+  skillE: {fileID: 0}
+  skillR: {fileID: 0}
+  logCastEvents: 1
+--- !u!114 &5306362140962538019
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9c4b119e16152a44781215c0a50299ec, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  projectilePrefab: {fileID: 3410324552669850733, guid: 0792528e912f7424482474dbb63438c2, type: 3}
+  createFallbackPrimitiveWhenPrefabMissing: 1
+  launchHeight: 1
+  logSpawnEvents: 0
 --- !u!114 &3359753580412422499
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -156,6 +235,7 @@ MonoBehaviour:
   heroDisplayName: "\u82F1\u96C4"
   disablePlayerControlOnDeath: 1
   disableCollidersOnDeath: 1
+  respawnPoint: {fileID: 0}
   logHeroEvents: 1
   entity: {fileID: 1537508490184514019}
 --- !u!114 &8374300092937071247
@@ -183,6 +263,28 @@ MonoBehaviour:
   logMoveCommands: 1
   logAttackCommands: 1
   drawCommandGizmos: 1
+--- !u!114 &5244274147053700043
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d135deebe2c6c6f4db3c6742a530f9ec, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  controlledEntity: {fileID: 1537508490184514019}
+  skillComponent: {fileID: 1399721446264363885}
+  groundLayerName: Ground
+  commandLayers:
+    serializedVersion: 2
+    m_Bits: 4294967291
+  maxRayDistance: 500
+  groundPlaneY: 0
+  logCastCommands: 1
+  drawDebugRay: 0
 --- !u!1 &7347408681005187016
 GameObject:
   m_ObjectHideFlags: 0

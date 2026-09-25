@@ -28,6 +28,17 @@ def run(name, source, expect_hits):
     return ok
 
 
+def run_cjk(name, source, expect_hits):
+    """自测第 7 项检查（中文出现在注释与字符串之外）。"""
+    stripped = mod.strip_comments_and_strings(source)
+    hits = mod.check_cjk_outside_literals(stripped, source, "Fake.cs")
+    ok = len(hits) == expect_hits
+    print("[%s] %s  -> 命中 %d 条（期望 %d）" % ("PASS" if ok else "FAIL", name, len(hits), expect_hits))
+    for h in hits:
+        print("        " + h)
+    return ok
+
+
 CASES = [
     # 1. 真错：迭代器里写了裸 return（就是本次 Unity 报的 CS1622）
     ("迭代器内的裸 return", """
@@ -163,7 +174,129 @@ namespace MOBA.Core
 """, 1),
 ]
 
+# 第 7 项检查（中文出现在注释与字符串之外）的用例。
+# 第 1 个是真实踩到的写法：在 Debug.LogWarning 的中文说明里又写了一对英文双引号。
+CJK_CASES = [
+    # 1. 真错：字符串被提前闭合，中间那段中文变成了"标识符"
+    ("字符串内误用英文双引号", """
+using UnityEngine;
+
+namespace MOBA.Skills
+{
+    public class Fake : MonoBehaviour
+    {
+        private void Warn()
+        {
+            Debug.LogWarning("落点将退回"射线与地面平面的交点"计算。");
+        }
+    }
+}
+""", 1),
+
+    # 2. 正确写法：中文全在字符串内，且用「」代替嵌套引号 —— 绝不能误报
+    ("中文只在字符串内", """
+using UnityEngine;
+
+namespace MOBA.Skills
+{
+    public class Fake : MonoBehaviour
+    {
+        private void Warn()
+        {
+            Debug.LogWarning("落点将退回「射线与地面平面的交点」计算。");
+        }
+    }
+}
+""", 0),
+
+    # 3. 中文只在注释里 —— 注释已被剥离，绝不能误报
+    ("中文只在注释里", """
+namespace MOBA.Skills
+{
+    /// <summary>这里全是中文说明，不参与编译。</summary>
+    public class Fake
+    {
+        // 行内注释也全是中文。
+        private int value = 1;
+    }
+}
+""", 0),
+
+    # 4. 插值字符串里的中文（$"..."）同样属于字符串内容，不能误报
+    ("插值字符串里的中文", """
+using UnityEngine;
+
+namespace MOBA.Skills
+{
+    public class Fake : MonoBehaviour
+    {
+        private void Log(int count)
+        {
+            Debug.Log($"[AreaEffectZone] 本 tick 命中 {count} 个敌方单位");
+        }
+    }
+}
+""", 0),
+
+    # 5. 转义双引号 \\" 是合法写法，其后的中文仍在字符串内，不能误报
+    ("转义双引号后的中文", """
+using UnityEngine;
+
+namespace MOBA.Skills
+{
+    public class Fake : MonoBehaviour
+    {
+        private void Log(string layerName)
+        {
+            Debug.LogWarning($"未找到名为 \\"{layerName}\\" 的 Layer，已跳过。");
+        }
+    }
+}
+""", 0),
+
+    # 6. 预处理器指令后的中文是自由文本 —— 首次上线本检查时，本项目 8 个文件的 #region
+    #    中文名就是被这一条误报的，因此必须有这条假阳性防护。
+    ("#region 的中文名", """
+namespace MOBA.Skills
+{
+    public class Fake
+    {
+        #region 状态跳转阈值（供各状态共享）
+
+        private int threshold = 1;
+
+        #endregion
+    }
+}
+""", 0),
+
+    # 7. 插值字符串的"洞"里再嵌字符串字面量 —— 这是本项目最容易被误报的写法，
+    #    Stage2AutoTester / AutoSceneBuilder 里大量使用。剥离器必须识别洞的边界，
+    #    否则洞内第一个引号会被当成外层字符串的结束，此后整份文件全部错位。
+    ("插值洞内嵌字符串", """
+using UnityEngine;
+
+namespace MOBA.Tests
+{
+    public class Fake : MonoBehaviour
+    {
+        private void Report(bool pass, int hits)
+        {
+            Debug.Log(
+                $"测试结论：{(pass ? "全部通过" : "存在失败项")}\\n" +
+                $"  · 命中次数：{hits}（期望 3）");
+        }
+    }
+}
+""", 0),
+]
+
 if __name__ == "__main__":
     results = [run(*c) for c in CASES]
-    print("\n合计：%d / %d 通过" % (sum(results), len(results)))
-    sys.exit(0 if all(results) else 1)
+
+    print("")
+    cjk_results = [run_cjk(*c) for c in CJK_CASES]
+
+    total = results + cjk_results
+    print("\n合计：%d / %d 通过" % (sum(total), len(total)))
+    sys.exit(0 if all(total) else 1)

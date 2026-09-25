@@ -1,4 +1,5 @@
 ﻿using UnityEngine;
+using MOBA.Skills;
 
 namespace MOBA.Data
 {
@@ -31,6 +32,22 @@ namespace MOBA.Data
                  "留空时 CombatComponent 会沿用其 Inspector 上直挂的 AttackData。")]
         [SerializeField] private AttackData attack;
 
+        [Header("法力与技能（阶段六）")]
+        [Tooltip("最大法力值。填 0 表示该单位没有法力（小兵/建筑保持 0 即可），ManaComponent 不会启用回复。")]
+        [Min(0f)]
+        [SerializeField] private float maxMana = 0f;
+
+        [Tooltip("每秒法力回复量。填 0 表示不自动回复。")]
+        [Min(0f)]
+        [SerializeField] private float manaRegenPerSecond = 0f;
+
+        [Tooltip("Q 槽位技能配置，由 EntityBase 注入 SkillComponent。" +
+                 "留空时 SkillComponent 会沿用其 Inspector 上直挂的 SkillData。")]
+        [SerializeField] private SkillData skillQ;
+
+        [Tooltip("W 槽位技能配置，注入规则同 Q。")]
+        [SerializeField] private SkillData skillW;
+
         public float MaxHealth => maxHealth;
 
         public float MoveSpeed => moveSpeed;
@@ -39,5 +56,17 @@ namespace MOBA.Data
 
         /// <summary>普通攻击配置引用。可能为 null，使用方需判空。</summary>
         public AttackData Attack => attack;
+
+        /// <summary>最大法力值；0 表示该单位没有法力。</summary>
+        public float MaxMana => maxMana;
+
+        /// <summary>每秒法力回复量；0 表示不自动回复。</summary>
+        public float ManaRegenPerSecond => manaRegenPerSecond;
+
+        /// <summary>Q 槽位技能配置，可能为 null。</summary>
+        public SkillData SkillQ => skillQ;
+
+        /// <summary>W 槽位技能配置，可能为 null。</summary>
+        public SkillData SkillW => skillW;
     }
 }

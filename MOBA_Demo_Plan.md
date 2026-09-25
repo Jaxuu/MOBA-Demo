@@ -2,7 +2,7 @@
 
 > 本文档承载**实施细节与阶段计划**，需求权威以 `README.md` 为准。两者冲突时以 `README.md` 为准。
 > 交付目标：**带有美术表现、核心机制完整、真正可玩的「简易版英雄联盟」（MOBA Vertical Slice）**。
-> 阶段一 ~ 阶段五已完成；阶段六 ~ 阶段八为全新规划。
+> 阶段一 ~ 阶段七**已完成并封版**（阶段七实机验收通过）；**准备进入阶段八（美术表现与表现层分离）**。
 
 ---
 
@@ -60,9 +60,10 @@ Assets/
 │   │   ├── TeamType.cs             # ✅ 阵营枚举
 │   │   ├── EntityType.cs           # ✅ 英雄、小兵、塔、基地类型
 │   │   └── Interfaces/
-│   │       ├── IDamageable.cs      # ✅
+│   │       ├── IDamageable.cs      # ✅（阶段六新增 source 重载，供击杀归属）
 │   │       ├── ITargetable.cs      # ✅
-│   │       └── IStatusReceiver.cs  # 🆕 Buff/Debuff 接收接口（阶段六）
+│   │       └── （不新建 IStatusReceiver）  # 阶段六裁定：护盾落 HealthComponent、减速/眩晕落 BuffComponent，
+│   │                                       # 均为具体组件的公开方法调用；无消费方的接口 = 死代码
 │   ├── Components/
 │   │   ├── HealthComponent.cs      # ✅ 生命值、伤害、治疗、死亡判定
 │   │   ├── ManaComponent.cs        # 🆕 法力值与消耗（阶段六）
@@ -114,7 +115,7 @@ Assets/
 │   ├── Debug/
 │   │   ├── FSMDebugView.cs         # ✅
 │   │   ├── MatchDebugView.cs       # ✅
-│   │   └── TowerAggroDebugView.cs  # 🆕 塔仇恨可视化（阶段六）
+│   │   └── TowerAggroDebugView.cs  # 🆕 塔仇恨可视化（阶段六 6B，本轮不做）
 │   └── Editor/
 │       └── AutoSceneBuilder.cs     # ✅ 一键组装（需持续升级，见 §6 铁律）
 ├── ScriptableObjects/
@@ -491,7 +492,11 @@ classDiagram
 
 ---
 
-### 阶段六：技能系统与战斗拓展（核心玩法闭环）⏳ 待开发
+### 阶段六：技能系统与战斗拓展（核心玩法闭环）✅ 6A 已完成（实机验收通过）/ 6B（塔仇恨）顺延
+
+> **拆版说明**：本阶段按架构师裁决拆为 **6A（技能系统与战斗拓展）** 与 **6B（防御塔仇恨优先级）**。
+> 6A 范围 = 下述 (1)~(5)，代码已交付且编译 / 资产注入 / 静态检查均已通过，**实机技能验收（`Stage6AutoTester`）待跑**；
+> 6B 范围 = 下述 (6)，本轮【不做】。
 
 > **核心**：引入完整的技能架构（`ScriptableObject` 驱动的 `SkillData`）。
 > **机制**：指向性技能（弹道 Projectile）、非指向性 AOE 技能、基础 Buff/Debuff（减速、眩晕），以及技能 CD 与蓝耗管理。
@@ -508,10 +513,17 @@ classDiagram
 **（1）技能系统架构**
 
 - **数据层**：`SkillData`（槽位、图标、冷却、蓝耗、施法距离、作用半径、伤害/护盾值、效果类型、目标类型、持续时间）。
-- **效果层**：`SkillEffectType`（伤害 / 护盾 / 减速 / 眩晕）+ `SkillTargetSelector`（范围内敌方 / 指定敌方单位 / 指定友方单位 / 地面点）+ `SkillEffectResolver`（效果结算）。
-- **执行层**：`SkillComponent.TryCast(slot, groundPoint, target)` 唯一入口 —— 校验 CD → 蓝量 → 施法距离 → 目标合法性 → 扣蓝 → 起 CD → 执行效果 → 广播 `OnSpellCast`。
+- **效果层**：`SkillEffectType`（伤害 / 护盾 / 减速 / 眩晕）+ 目标选择 + `SkillEffectResolver`（效果结算）。
+  **实现期裁定（阶段六）**：不建名为 `SkillTargetSelector` 的独立类型 ——「目标选择」由三处各自承担：
+  `SkillCastType`（`UnitTarget` / `GroundPoint`，决定这次施法需要一个什么目标）、
+  `SkillComponent.TryValidateTarget`（指定敌方单位的合法性）、`AreaEffectZone` 的半径收集（范围内敌方）。
+  功能全覆盖，只是不引入一个只做转发的中间层。
+  **已知扩展点**：「指定友方单位」当前【未实现】—— `TryValidateTarget` 只接受敌方单位。
+  README §2.1.2 把「对指定友方施加护盾」列为技能形态之一，但**不在首批 Q/W 范围内**；
+  将来做友方护盾技能时需在此处扩展（`SkillEffectType.Shield` 与 `SkillEffectResolver.ApplyShield` 已就位，只差目标校验放行友方）。
+- **执行层**：`SkillComponent.TryCast(slot, groundPoint, target, out failReason)` 唯一入口 —— 校验 CD → 蓝量 → 施法距离 → 目标合法性 → 扣蓝 → 起 CD → 执行效果 → 广播 `OnSpellCast`；被拒绝时通过 `failReason` 给出可读原因（含剩余冷却 / 所需与当前法力 / 实际距离与射程 / 目标阵营）。
 - **输入层**：`PlayerSkillController` 采集 Q/W 按键与鼠标位置（非指向性技能需要方向/落点）。
-- 首批技能：**Q = 非指向性 AOE 伤害**；**W = 指向性控制或护盾**。
+- 首批技能：**Q = 指向性非穿透弹道**（锁定敌方单位 → 弹道命中结算伤害并销毁）；**W = 非指向性 AOE 减速圈**（指定落点 → 持续范围效果 → 周期减速）。
 
 **（2）指向性技能与弹道**
 
@@ -525,7 +537,12 @@ classDiagram
 
 **（4）Buff / Debuff**
 
-- `BuffComponent` + `BuffData`：状态类型（减速 / 眩晕 / 护盾）、数值、持续时间、叠加与刷新策略。
+- `BuffComponent`（状态类型：减速 / 眩晕 / 护盾、数值、持续时间、叠加与刷新策略）。
+  **实现期裁定（阶段六）**：不单独建 `BuffData` 资产 —— V1 的 buff 参数（减速比例、减速时长、眩晕时长、护盾值）全部来自 `SkillData`，
+  而当前**没有任何"独立于技能的 buff 来源"**（装备 / 光环 / 中立生物光环）。建出来就是无消费方的死代码，
+  与 README §3.5「数据层 = `SkillData`」一致，也与本项目「无消费方的标记组件 = 死代码」的既有裁决同一标准
+  （参见阶段五"不做 `SpawnPoint.cs`"）。将来出现非技能来源的 buff 时再抽 `BuffData`，
+  届时 `BuffComponent.ApplySlow / ApplyStun / ApplyShield` 的签名无需改动。
 - 减速：修改移动速度（只经 `MovementComponent.SetMoveSpeed()`，禁止直接改 `NavMeshAgent`）。
 - 眩晕：禁止移动与攻击，到期自动解除。
 - 护盾：优先吸收伤害，耗尽或到期移除。
@@ -535,26 +552,36 @@ classDiagram
 - `ManaComponent`：当前法力、消耗、不足判定，事件广播供 HUD 订阅。
 - 技能冷却剩余时间可查询（供阶段七的 CD 遮罩读取）。
 
-**（6）防御塔仇恨优先级**（承接需求，本阶段一并实现）
+**（6）防御塔仇恨优先级**（⚠️ 已拆分为 **6B**，本阶段【不做】）
+
+> **拆版裁定（架构师 D5）**：「本阶段绝对不碰防御塔仇恨，保持目标纯粹。」
+> 本节内容连同下方验收标准里的「塔仇恨」条目一并顺延到 **6B** 单独实施。
+> 6A（技能系统与战斗拓展）已按上述 (1)~(5) 封版；`TowerController` 仍处于"已就位、未挂载"状态。
 
 - 默认优先级 **小兵 > 英雄**（同级取最近）；敌方英雄在塔范围内攻击己方英雄 → **仇恨转移到该英雄**；目标死亡/离场/非法 → 重选；重评估节流 ≤ 0.25 s；**同一时刻单目标**。
-- 新增 `TowerAggroDebugView` 可视化当前仇恨目标与优先级判定结果。
+- 新增 `TowerAggroDebugView` 可视化当前仇恨目标与优先级判定结果。（随 6B 顺延）
 
 **验收标准**
 
 - **技能拒绝路径**：CD 中 / 蓝量不足 / 超出施法距离 / 目标非法（友方、已死亡、已销毁）时，释放被拒绝且**不产生任何副作用**（不扣蓝、不起 CD、不播动画、不生成特效）。
-- **Q（非指向性 AOE）**：范围内所有敌方单位受伤，友方零伤害；CD / 蓝耗 / 半径 / 伤害与 `SkillData` **完全一致**；改资产即可改技能，无需改代码。
-- **W（指向性）**：护盾按配置吸收伤害并在耗尽/到期后正确移除；控制效果按配置时长生效并到期自动解除。
+- **拒绝原因可观测**：上述每一条拒绝路径都必须通过 `TryCast` 的 `failReason` 出参给出**可读且带量化信息**的原因（剩余冷却秒数 / 所需与当前法力 / 实际距离与射程 / 目标阵营 / 前摇硬直剩余时间），并由 `PlayerSkillController` 打进 Console —— **不允许只输出"被拒绝"三个字**（使用者无法区分"按了没反应"的具体成因，是最消耗调试时间的一类体验问题）。
+- **小兵可被控制**：减速 / 眩晕等状态效果对所有可被选中的敌方单位生效，**不限于英雄** —— 因此 `MinionPrefab` 必须挂载 `BuffComponent`（缺它时效果无处落地，且只在运行期打一条告警后静默放弃）。
+- **Q（指向性非穿透弹道）**：锁定敌方单位后发射弹道，**命中时**才结算伤害；`maxHitCount = 1` 保证非穿透（命中即销毁）；CD / 蓝耗 / 射程 / 弹速 / 伤害与 `SkillData` **完全一致**；改资产即可改技能，无需改代码。
+- **W（非指向性 AOE 减速）**：以指定落点为中心，`OverlapSphereNonAlloc` 收集范围内**敌方**单位并周期施加减速，友方与中立零影响；减速生效期间移速符合配置且**到期精确恢复原值**；CD / 蓝耗 / 半径 / 减速比例 / 持续时长与 `SkillData` **完全一致**。
 - **弹道**：有可见飞行时间，**命中与伤害结算严格一致**（不允许"先扣血、后飞弹"）；目标中途死亡时弹道安全回收，无空引用。
 - **Buff/Debuff**：减速生效期间移速符合配置且到期恢复原值；眩晕期间无法移动与攻击；重复施加按既定策略（刷新时长）执行，不产生叠加失控。
 - **蓝耗**：法力不足时无法施法；法力随时间/事件回复（若配置）符合预期。
-- **塔仇恨**：默认打小兵；英雄 A 在塔范围内攻击己方英雄后，塔在 **1 个重评估周期（≤ 0.25 s）内**把仇恨切到英雄 A；英雄 A 离开交战半径或死亡后，塔在 1 个周期内回到小兵；**塔不会同时攻击两个目标**。
+- **塔仇恨**（⏭️ 顺延至 6B，本阶段不验收）：默认打小兵；英雄 A 在塔范围内攻击己方英雄后，塔在 **1 个重评估周期（≤ 0.25 s）内**把仇恨切到英雄 A；英雄 A 离开交战半径或死亡后，塔在 1 个周期内回到小兵；**塔不会同时攻击两个目标**。
 - 技能释放瞬间 GC Alloc ≤ 1 KB；战斗中不因技能产生持续 GC。
+  **实现期说明（阶段六）**：施法路径上的**可避免分配已清零**（范围场对象名由字符串插值改为常量，省掉每次施法一次 string 分配）。
+  但弹道 `Instantiate` / `Destroy` 与范围场 `new GameObject` 属**每次施法的固有分配**（数百字节 ~ KB 级），
+  处于该阈值的边界。**测量前提**：关闭 `SkillComponent.logCastEvents` 与 `PlayerSkillController.logCastCommands`
+  （调试日志的字符串插值会额外分配，开着必然超标）。**彻底归零**依赖阶段八的对象池，已在架构草案 §7 登记为已知风险点。
 - **表现关闭一致性**：禁用全部技能特效后，技能伤害与胜负结果完全一致。
 
 ---
 
-### 阶段七：信息可视化与对局 UI（玩家心流体验）⏳ 待开发
+### 阶段七：信息可视化与对局 UI（玩家心流体验）✅ **[x] 已完成**（2026-09-25 封版，实机验收通过）
 
 > **核心**：世界空间（World Space）血条显示、伤害飘字（Damage Popups）、小地图（Minimap）映射、屏幕顶部的击杀播报与计分板。
 > **机制**：英雄死亡后的复活倒计时与出生点重生机制。
@@ -611,6 +638,54 @@ classDiagram
 - **计分板**：击杀数与 `MatchStatsTracker` 统计完全一致，无重复计数。
 - **复活**：死亡到复活的耗时与 `MatchConfigData` 配置一致（误差 ≤ 0.1 s）；复活后满血满蓝、位置在己方出生点、可正常移动与施法；对局结束后不再复活。
 - 同屏 30 单位 + 全部 UI 开启时 ≥ 60 FPS，UI 相关稳态 GC Alloc ≈ 0 B/帧。
+
+**交付结果（2026-09-25 封版）**
+
+| 项 | 交付内容 |
+|---|---|
+| 世界空间血条 | `WorldHealthBarManager` + `WorldHealthBarView`：管理器订阅 `EntityRegistry` 统一挂载（**单位预制体零改动**）；锚点取碰撞体包围盒顶部（绑定时一次性测量并缓存偏移）；billboard = 复制相机旋转；恒定屏幕像素高度 = 缩放 ∝ 与相机距离；满血 / 死亡 / 相机背后三条显隐规则；护盾覆盖层 |
+| 伤害飘字 | `DamagePopupManager` + `DamagePopupView`：**共享世界空间画布**（1 draw call、1 次 billboard）+ 单管理器循环 Tick（不给每个飘字挂 `Update`）；池预生成 32；上浮（easeOutQuad）+ 缩放脉冲 + 淡出 |
+| 玩家 HUD | `HeroHUDView` + `SkillSlotView`：头像（死亡置灰）+ 血条 + 蓝条 + Q/W 技能槽（图标 / 蓝耗 / 按键 / 秒数）；CD 径向遮罩每帧读 `GetCooldownRemaining`，**秒数只在整秒跳变时写文本** |
+| 小地图 | `MinimapView`：世界 XZ → 小地图 XY 等比例映射（映射范围取地面覆盖包围盒，**与 NavMesh 烘焙同源**）；标记池化 + 登记/注销事件驱动；英雄用更醒目的独立标记；死亡即隐藏、复活自动重现 |
+| 击杀播报与计分板 | `MatchStatsTracker`（**唯一计数器**，只统计英雄击杀，归属读 `HealthComponent.LastDamageSource`）+ `KillFeedView`（固定 5 槽位、下移式 FIFO、自动淡出）+ `ScoreboardView`（只读统计器，不自己计数） |
+| 复活机制 | `MatchController` 统筹倒计时（读 `MatchConfigData.RespawnTime`，对局结束不再复活）+ `HeroController.Revive()` 执行逆操作（满血满蓝、回出生点、恢复寻路/碰撞/选中/输入）+ `RespawnOverlayView`（挂常驻物体，只开关面板） |
+| 逻辑层增量 | `HealthComponent.OnDamaged(HealthComponent,float,float,EntityBase)` + `Revive()`、`ManaComponent.RestoreFull()`、`EntityRegistry.OnEntityRegistered/OnEntityUnregistered`、`MatchConfigData.respawnTime`、`HeroController.Revive/OnHeroRespawned` —— **全部为新增成员，阶段一~六代码零改动** |
+| 对象池 | `Core/PrefabPool.cs` 泛型组件池：血条 / 飘字 / 小地图标记共用（阶段八 VFX 可直接复用）；池空返回 null + 一次性告警（**绝不 Instantiate**）；归还只 `SetActive(false)`，视图在自身 `OnDisable` 里退订与复位 |
+| 自动化基建 | `AutoSceneBuilder` 改 `partial` 并拆出 `AutoSceneBuilder.UIAssembly.cs`（步骤 17）：一键生成全部 Canvas / 血条 / HUD / 小地图 / 播报 / 复活遮罩并注入全部引用；占位白图与内置字体三级回退；`ValidateUISetup` 给出确定性校验结论 |
+| 工程前置 | `Packages/manifest.json` 加入 `com.unity.ugui: 1.0.0`（编辑器内置包，**离线可解析**）。**TextMeshPro 不在内置包清单** → 本阶段全部文字走 uGUI 旧版 `Text` |
+
+**验收结果**
+
+| 验收项 | 结论 | 依据 |
+|---|---|---|
+| 血条位置偏差 < 5 px（1080p）、billboard 始终朝向相机 | ✅ 实机确认 | 复制相机旋转 + `localScale ∝ 距离`；滚轮缩放时屏幕像素高度恒定 |
+| 同屏 20 血条无逐帧 GC、数值事件驱动（无每帧轮询） | ✅ 闭环 | 数值只走 `OnHealthChanged` / `OnShieldChanged`；每帧只写 Transform，无字符串、无 foreach 分配 |
+| 每次伤害 1 条飘字、数值 = 实际扣血量 | ✅ 实机确认 | `OnDamaged` 第一参数即"实际扣减量"；被护盾完全吸收时画灰蓝"吸收 N"（保证"每次伤害必有反馈"） |
+| 连续战斗 3 分钟池对象数量稳定不增长 | ✅ 实机确认 | 池预生成 + `Release` 复位；池耗尽只隐藏、不影响逻辑 |
+| HUD 血/蓝条与实体数值一致 | ✅ 实机确认 | 事件驱动（`ManaComponent` 内部已按 0.5 点节流广播） |
+| CD 遮罩进度与实际可释放时刻误差 ≤ 0.05 s | ✅ 实机确认 | 每帧读 `GetCooldownRemaining`（60 FPS 下单帧误差 ≤ 16.7 ms） |
+| 死亡时头像置灰、技能不可点 | ✅ 实机确认 | 置灰订阅 `OnDied`；"不可点"由 `SkillComponent.TryCast` 自身的 `IsDead` 校验保证（表现层不参与规则判定） |
+| 小地图映射误差 ≤ 1 标记宽、死亡 1 帧内移除 | ⏳ 待补一次实机确认 | 映射范围与地面 / NavMesh 同源；标记在 `LateUpdate` 按 `IsDead` 隐藏（同一帧伤害结算 → 至多下一帧消失） |
+| 每次击杀恰好 1 条播报、连续 10 次不重叠不丢 | ✅ 实机确认 | 固定 5 槽位 FIFO + 下移式队列；唯一计数器 |
+| 计分板与统计完全一致、无重复计数 | ✅ 实机确认 | 计分板只读 `MatchStatsTracker`（结构性保证，而非两处各自算对） |
+| 复活耗时与配置一致（≤ 0.1 s）、满血满蓝、在出生点、可移动施法 | ✅ 实机确认 | `RespawnRoutine` + `Revive()` 的 9 步逆操作（**先启用 agent 再 `Warp`**，并校验 `isOnNavMesh`） |
+| 对局结束后不再复活 | ✅ 闭环 | `MatchController.IsMatchOver` 早退 + `StopRespawnCountdown()` |
+| 同屏 30 单位 + 全部 UI 开启 ≥ 60 FPS、UI 稳态 GC Alloc ≈ 0 B/帧 | ⏳ 待 Profiler 采样 | 与阶段五同口径：量化采样项留待阶段八开发前用 Profiler 补测（风险点见"已知风险"） |
+
+**本阶段的四项设计裁决（封版口径，不再复议）**
+
+1. **`OnDamaged` 的发送者放在第一个参数**（`Action<HealthComponent, float, float, EntityBase>`）：受伤是高频事件，带上发送者后飘字管理器可以用**一个无捕获回调**订阅全部单位；若按单位建闭包，每次订阅都会产生一次堆分配，直接顶掉"稳态 GC ≈ 0"的验收目标。
+2. **血条与飘字不由单位挂载**，而由管理器订阅 `EntityRegistry` 统一挂 / 还池：换来的是**单位预制体零改动**、动态小兵自动覆盖、逻辑层零 UI 引用（禁用管理器 = 关掉全部血条，对局结果完全不变，符合"表现层可整体关闭"铁律）。
+3. **小地图标记的显隐用"每帧读 `IsDead`"而不是订阅 `OnDied`**：英雄死亡后并不注销（它会复活），用事件就必须再补一个"复活 → 显示"的事件并成对维护；读一个 bool 字段零成本，且天然覆盖"死亡隐藏 → 复活重现"整条链路。
+4. **补装既有缺口**：`MatchResultView`（阶段四已验收的类）此前**从未被任何工具装配进场景**——基地被摧毁后屏幕上什么都不显示。步骤 17 现已创建它并注入 `matchController`（**未改动其任何代码**，遵守 D5"本轮不碰 MatchResultView"）。
+
+**已知风险（登记，不阻断封版）**
+
+- 世界空间 UI 的批次成本：每条血条是一个独立的 World Space Canvas（无法跨 Canvas 合批）→ 24 条血条 = 24 次 draw call。在 60 FPS 预算内；若超标，只需把 `WorldHealthBarView` 内部换成"屏幕空间投影"实现，**对外契约（`Bind` / 事件订阅）完全不变**。
+- 世界空间 UI 会被场景几何遮挡（Canvas 默认 `ZTest LEqual`）：阶段八用"UI 专用 Layer + 只渲染该层的第二相机"解决。
+- 阶段六遗留：`TargetingComponent.FindNearestEnemy` 使用 `Physics.OverlapSphere`（每次调用分配数组）→ 会让"UI 稳态 GC ≈ 0"的实测被它掩盖，建议顺手换成 `OverlapSphereNonAlloc`（`AreaEffectZone` 已有同族范式）。
+
+> **阶段七之外的收尾补丁（同日）**：白盒期尸体清理——新增 `Core/EntityVisuals.cs` 统一开关渲染器；英雄 `HandleDied` 隐藏肉身 / `Revive` 恢复；小兵 `EntityAIController` 隐藏 + `corpseLingerSeconds`（默认 2 秒）后销毁整个 GameObject。该补丁属白盒期权宜手段，**阶段八接入真实模型与死亡动画后应由表现层接管，届时删除这两处调用点即可**。
 
 ---
 

@@ -21,6 +21,20 @@
         void TakeDamage(float amount);
 
         /// <summary>
+        /// 受到一次带来源的伤害（阶段六新增重载）。
+        ///
+        /// 【为什么现在加】阶段七要做击杀播报与计分板，必须知道"这一下是谁打的"。
+        /// 若等到那时再改接口，需要回头排查所有伤害调用点；而现在全项目只有
+        /// CombatComponent.TryAttack 与技能系统两个调用方，是改动成本的最低点。
+        ///
+        /// 【为什么是重载而不是改签名】保留无来源版本可让既有调用方（含测试代码）零改动，
+        /// 语义上等价于"来源未知"。新增能力、不改既有契约，符合"封版后只做无损增量"的约定。
+        /// </summary>
+        /// <param name="amount">伤害数值，应为正数。</param>
+        /// <param name="source">伤害来源实体，允许为 null（表示来源未知）。</param>
+        void TakeDamage(float amount, EntityBase source);
+
+        /// <summary>
         /// 是否已死亡。
         /// 供攻击方在出手前做目标合法性校验，也供 UI 与 AI 判断是否要停止输出。
         /// </summary>

@@ -20,6 +20,7 @@ GameObject:
   - component: {fileID: 586040467032990962}
   - component: {fileID: 8622776106641902343}
   - component: {fileID: 2011859111162120909}
+  - component: {fileID: 5419534584198582014}
   m_Layer: 0
   m_HasEditorInfo: 1
   m_Name: MinionPrefab
@@ -213,6 +214,7 @@ MonoBehaviour:
   attackData: {fileID: 11400000, guid: 0e53095ba28cfff499378bcf13679579, type: 2}
   logAttackEvents: 1
   drawAttackRangeGizmos: 1
+  attackLocked: 0
 --- !u!114 &586040467032990962
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -228,6 +230,7 @@ MonoBehaviour:
   defaultMaxHealth: 100
   maxHealth: 100
   currentHealth: 100
+  currentShield: 0
   logHealthChanges: 0
 --- !u!114 &8622776106641902343
 MonoBehaviour:
@@ -260,3 +263,25 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   drawPathGizmos: 1
+  movementLocked: 0
+--- !u!114 &5419534584198582014
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3057170169162295303}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2861b6cd048e30c47892798bbaa8d9c4, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  logBuffEvents: 0
+  slowed: 0
+  slowPercent: 0
+  slowEndTime: 0
+  stunned: 0
+  stunEndTime: 0
+  shieldActive: 0
+  shieldEndTime: 0
+  baseSpeed: 0

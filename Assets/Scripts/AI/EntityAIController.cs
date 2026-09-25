@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿using System.Collections;
+using UnityEngine;
 using MOBA.Components;
 using MOBA.Core;
 using MOBA.Gameplay;
@@ -67,6 +68,18 @@ namespace MOBA.AI
         [Min(0.1f)]
         [SerializeField] private float stagnationDuration = 1f;
 
+        [Header("尸体清理（白盒期）")]
+        [Tooltip("单位死亡后尸体在场景里停留多久（秒），到期销毁整个 GameObject。\n" +
+                 "为什么必须销毁：本 Demo 的小兵由 MinionSpawner 持续生成，一局会产生成百上千个；\n" +
+                 "尸体若只停逻辑不销毁，长时间对局会持续堆积 GameObject 与组件（内存与层级双双膨胀）。\n" +
+                 "填 0 表示死亡当帧（下一帧）就销毁。")]
+        [Min(0f)]
+        [SerializeField] private float corpseLingerSeconds = 2f;
+
+        [Tooltip("在 Console 输出「尸体已销毁」的记录。一局会产生成百上千个小兵，" +
+                 "排查尸体是否真的被清理时打开，平时建议关闭以免刷屏。")]
+        [SerializeField] private bool logDeathCleanup = false;
+
         /// <summary>FSM 核心引擎，在 Awake 中实例化（纯 C# 类，不需要挂在 GameObject 上）。</summary>
         private StateMachine stateMachine;
 
@@ -79,6 +92,13 @@ namespace MOBA.AI
 
         /// <summary>已成功订阅死亡事件的生命组件引用，用于在销毁时精确退订（避免订阅对象变化后退错对象）。</summary>
         private HealthComponent subscribedHealth;
+
+        /// <summary>
+        /// 尸体延时销毁的协程句柄。
+        /// 作用有两个：① 防止死亡事件重复到达时启动两个销毁协程；
+        /// ② 让"是否已经安排了销毁"这件事可被查询（调试时很实用）。
+        /// </summary>
+        private Coroutine corpseCleanupRoutine;
 
         /// <summary>是否已完成 AI 初始化。作用与 EntityBase.hasInitialized 一致：防止 Start 与显式初始化重复执行。</summary>
         private bool hasInitialized;
@@ -447,6 +467,9 @@ namespace MOBA.AI
                 Debug.LogWarning(
                     $"[EntityAIController] {name} 在 AI 初始化时已处于死亡状态，直接切入 DeadState。", this);
                 SwitchState(deadState);
+
+                // 兜底路径同样要清理尸体：否则"开局就死在场景里的单位"会永远立在那里，且永不销毁。
+                HandleCorpseCleanup();
             }
         }
 
@@ -653,6 +676,65 @@ namespace MOBA.AI
         private void HandleOwnerDied()
         {
             SwitchState(deadState);
+
+            // 视觉收尾：立刻隐藏肉身 + 安排延时销毁（详见 HandleCorpseCleanup）。
+            // 放在 SwitchState 之后：先让逻辑上的死亡收尾（DeadState.Enter 停寻路/禁碰撞/禁代理）完成，
+            // 再动物体外观，两者互不依赖，但顺序固定下来后行为更容易推理。
+            HandleCorpseCleanup();
+        }
+
+        /// <summary>
+        /// 尸体清理（白盒期）：先让尸体立刻从画面上消失，再安排一次延时销毁。
+        ///
+        /// 【为什么"立刻隐藏"与"延时销毁"要分两步】
+        /// 隐藏是即时的视觉反馈（战场上不该立着一排尸体）；而销毁需要一个短暂的停留期：
+        /// 死亡瞬间的伤害飘字与击杀播报都还在播，飘字的锚点就在这个单位身上，
+        /// 若当帧就把物体删掉，表现层的上下文会突然消失。因此先"看起来死了"，再"真的消失"。
+        ///
+        /// 【为什么不用 Destroy(gameObject, delay) 这个重载】它无法被查询、也无法取消，
+        /// 排查时看不到"到底有没有安排销毁"。用协程可以显式记下句柄，便于防重入与调试。
+        /// </summary>
+        private void HandleCorpseCleanup()
+        {
+            if (entity == null)
+            {
+                return;
+            }
+
+            // 1. 立刻隐藏肉身（含全部子节点）。与英雄走同一个工具方法，保证两边的口径一致。
+            EntityVisuals.SetRenderersEnabled(entity.gameObject, false);
+
+            // 2. 安排延时销毁。
+            //    已有句柄说明已经安排过：死亡事件本身只广播一次，但"初始化兜底"与"事件回调"两条路径
+            //    都指向这里，这个判断让它们天然幂等。
+            if (corpseCleanupRoutine == null)
+            {
+                corpseCleanupRoutine = StartCoroutine(DestroyCorpseAfterDelay());
+            }
+        }
+
+        /// <summary>
+        /// 延时销毁尸体，把它彻底移出内存与层级。
+        ///
+        /// 【必须用 yield break 而不是 return】本方法是迭代器（方法体内有 yield return），
+        /// C# 不允许在迭代器块里写普通的 return;（会报 CS1622）。
+        ///
+        /// 【为什么不需要"物体是否已被销毁"的判空】物体被销毁时 Unity 会自动停止它的协程，
+        /// 因此 yield 之后的代码只在物体仍然存活时才会执行。
+        /// </summary>
+        private IEnumerator DestroyCorpseAfterDelay()
+        {
+            yield return new WaitForSeconds(Mathf.Max(0f, corpseLingerSeconds));
+
+            corpseCleanupRoutine = null;
+
+            if (logDeathCleanup)
+            {
+                Debug.Log($"[EntityAIController] {name} 的尸体停留 {corpseLingerSeconds:F1} 秒结束，已销毁。", this);
+            }
+
+            // 销毁整个单位：EntityBase.OnDisable 会自动注销注册表，血条归还池、飘字与击杀统计同步退订。
+            Destroy(gameObject);
         }
 
         #endregion
