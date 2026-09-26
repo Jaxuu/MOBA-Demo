@@ -271,6 +271,54 @@ def check_cjk_outside_literals(stripped, text, rel):
     return problems
 
 
+def check_preprocessor_directives(stripped, rel):
+    """检查预处理指令配对：#region / #endregion 与 #if / #endif。
+
+    【为什么必须检查】它们不是语法元素，而是"分组标记"，但【配对是强制的】：
+    少一个 #endregion 报 CS1038、少一个 #endif 报 CS1027，两者都会让【整个程序集】编译失败。
+    而括号配平、引号奇偶这些检查都发现不了它 —— 实测踩坑：往一个已有 #region 的文件里插入新 region 时
+    漏写了 #endregion，编辑器里只有一条 CS1038 且指向【文件最后一行】，排查时很容易去怀疑别的地方
+    （本项目 2026-09-26 就因此浪费了一轮编译）。
+
+    判据用"剥离注释与字符串后的文本"，因此注释里写的 #region 不会被误计。
+    """
+    problems = []
+    region_stack = []
+    if_stack = []
+
+    for index, line in enumerate(stripped.splitlines(), 1):
+        token = line.strip()
+        if not token.startswith("#"):
+            continue
+        match = re.match(r"#\s*([A-Za-z_]+)", token)
+        if match is None:
+            continue
+        directive = match.group(1)
+        if directive == "region":
+            region_stack.append(index)
+        elif directive == "endregion":
+            if region_stack:
+                region_stack.pop()
+            else:
+                problems.append("%s: 第 %d 行的 #endregion 没有对应的 #region（CS1038）" % (rel, index))
+        elif directive == "if":
+            if_stack.append(index)
+        elif directive == "endif":
+            if if_stack:
+                if_stack.pop()
+            else:
+                problems.append("%s: 第 %d 行的 #endif 没有对应的 #if（CS1027）" % (rel, index))
+
+    for line_no in region_stack:
+        problems.append(
+            "%s: 第 %d 行的 #region 未闭合（缺 #endregion，编译器会在文件末尾报 CS1038）" % (rel, line_no))
+
+    for line_no in if_stack:
+        problems.append("%s: 第 %d 行的 #if 未闭合（缺 #endif，报 CS1027）" % (rel, line_no))
+
+    return problems
+
+
 def main():
     fix_bom = "--fix-bom" in sys.argv
     problems = []
@@ -334,6 +382,9 @@ def main():
             # 中文出现在注释与字符串之外：字符串被提前闭合的可靠信号（第 7 项）。
             problems.extend(check_cjk_outside_literals(stripped, text, rel))
 
+            # 预处理指令配对（#region/#endregion、#if/#endif）：CS1038 / CS1027 的成因。
+            problems.extend(check_preprocessor_directives(stripped, rel))
+
     print("已检查 %d 个 .cs 文件（根目录：%s）" % (checked, SRC_ROOT))
     if problems:
         print("\n发现 %d 个问题：" % len(problems))
@@ -341,7 +392,7 @@ def main():
             print("  - " + p)
         return 1
 
-    print("结构检查全部通过（BOM / 括号配平 / 命名空间归属 / 双引号奇偶 / 危险命名空间 / 迭代器 return / 中文越界）。")
+    print("结构检查全部通过（BOM / 括号配平 / 命名空间归属 / 双引号奇偶 / 危险命名空间 / 迭代器 return / 中文越界 / 预处理指令配对）。")
     print("提醒：本脚本无法替代编译，类型与成员是否存在仍需人工核对。")
     return 0
 

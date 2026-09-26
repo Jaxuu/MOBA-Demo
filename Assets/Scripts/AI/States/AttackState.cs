@@ -98,7 +98,22 @@ namespace MOBA.AI
             // ---------- 2. 目标拉开到滞回上界之外 → 重新追击 ----------
             if (distance > context.AttackExitDistance)
             {
-                context.TryEnterChaseState();
+                // 【传 false：不要求目标处在"追击发起半径"内】
+                // 理由见 EntityAIController.TryEnterChaseState 的参数说明 —— 本状态已经在交战中，
+                // 目标只是暂时拉开。此时再问一次"值不值得脱离兵线"是错的（本来就已经脱线了），
+                // 会把单位卡死在滞回上界外：既打不到（超出攻击距离）、又追不了（被闸门拒绝）。
+                //
+                // 【被拒绝时必须回待机，不能原地 return】
+                // 被拒绝只有两种可能：单位不具备追击能力（见 CanChase），或已被牵引出界。
+                // 两种情况下"继续留在攻击状态"都是错的：前者永远追不上，后者需要先走回兵线。
+                // 若这里只 return，本状态下一帧会用同一个距离再问一次，形成每帧重试的空转 ——
+                // Console 一片安静、单位却什么都不做，属于最难排查的一类失效。
+                // 回待机后由 IdleState 重新分流（够近就追、否则继续推进），路径自然收敛。
+                if (!context.TryEnterChaseState(false))
+                {
+                    context.TryEnterIdleState();
+                }
+
                 return;
             }
 

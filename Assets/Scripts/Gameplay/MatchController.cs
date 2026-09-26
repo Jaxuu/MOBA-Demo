@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using MOBA.AI;
 using MOBA.Components;
@@ -39,10 +40,18 @@ namespace MOBA.Gameplay
                  "玩家英雄不挂 EntityAIController / TowerController，因此其移动能力不受影响（仍可自由走动）。")]
         [SerializeField] private bool freezeBattlefieldOnMatchEnd = true;
 
-        [Header("英雄复活（阶段七）")]
+        [Header("英雄复活（阶段七 / 阶段八扩展）")]
         [Tooltip("玩家英雄。复活【倒计时】由本类统筹（配置与对局状态都在本类手上），" +
-                 "复活【动作】由 HeroController.Revive 执行（NavMeshAgent / Collider / 输入都是它禁用的）。")]
+                 "复活【动作】由 HeroController.Revive 执行（NavMeshAgent / Collider / 输入都是它禁用的）。\n" +
+                 "本引用同时是 HUD 与复活遮罩的数据源（IsHeroRespawning / RespawnRemaining 都只看它），" +
+                 "因此即使阶段八把复活扩展到全部 10 个英雄，这个字段也必须保留。")]
         [SerializeField] private HeroController playerHero;
+
+        [Tooltip("场上全部英雄（阶段八：蓝 5 + 红 5）。本类为每一个英雄独立编排复活倒计时。\n" +
+                 "【为什么需要独立记账】10 个英雄可能同时处于不同的倒计时阶段，" +
+                 "阶段七那个「同一时刻只允许一个倒计时」的全局标记会让第二个阵亡的英雄直接把第一个的倒计时吞掉。" +
+                 "数组为空时自动退化为只有玩家英雄（兼容阶段七生成的旧场景）。")]
+        [SerializeField] private HeroController[] heroes;
 
         [Tooltip("MatchConfigData 缺失时使用的兜底复活时长（秒）。正常应当配置在 MatchConfigData.RespawnTime。")]
         [Min(0f)]
@@ -58,18 +67,47 @@ namespace MOBA.Gameplay
         /// <summary>对局是否已结束。保证"只认第一次基地被摧毁"。</summary>
         private bool isMatchOver;
 
-        /// <summary>复活协程句柄。对局结束时必须掐断它，否则倒计时走完仍会把英雄放出来。</summary>
-        private Coroutine respawnRoutine;
+        /// <summary>
+        /// 一个英雄的复活倒计时账目（阶段八新增）。
+        /// 用"一个英雄一条记录"替代阶段七的单个布尔标记：10 个英雄可能同时处于不同的倒计时阶段，
+        /// 共用一个标记会让第二个阵亡的英雄直接把第一个的倒计时吞掉（表现为"某个英雄永远不复活"）。
+        /// </summary>
+        private sealed class RespawnEntry
+        {
+            /// <summary>正在倒计时的英雄。</summary>
+            public HeroController Hero;
+
+            /// <summary>该英雄的倒计时协程句柄，用于对局结束时精确掐断。</summary>
+            public Coroutine Routine;
+
+            /// <summary>该英雄的复活时刻（Time.time 基准）。</summary>
+            public float EndTime;
+        }
 
         /// <summary>
-        /// 是否正处于复活倒计时中。
-        /// 刻意用独立布尔而不是 <c>respawnRoutine != null</c>：StartCoroutine 会【同步】执行协程体到第一个 yield，
-        /// 也就是 OnRespawnCountdownStarted 会早于赋值语句执行 —— 那一刻若用句柄判断，订阅方会读到"没在复活"。
+        /// 正在倒计时的英雄清单。
+        /// 每局最多 10 条，条目的对象分配发生在"某英雄阵亡"这一刻（一局至多 10 次 × 若干轮），
+        /// 不在每帧路径上，因此不会影响稳态 GC 目标。
         /// </summary>
-        private bool isRespawning;
+        private readonly List<RespawnEntry> respawnEntries = new List<RespawnEntry>();
 
-        /// <summary>复活倒计时的结束时刻（Time.time 基准），用于帧级精确的剩余时间查询。</summary>
-        private float respawnEndTime;
+        /// <summary>
+        /// 参与复活编排的英雄数量。
+        /// 优先用 heroes 数组（阶段八，工具注入 10 个）；数组为空时退化为只有玩家英雄，
+        /// 这样阶段七生成的旧场景不需要重新组装也能继续工作。
+        /// </summary>
+        private int HeroCount
+        {
+            get
+            {
+                if (heroes != null && heroes.Length > 0)
+                {
+                    return heroes.Length;
+                }
+
+                return playerHero != null ? 1 : 0;
+            }
+        }
 
         /// <summary>对局是否已结束（只读），供对局结果 UI 与调试视图读取。</summary>
         public bool IsMatchOver => isMatchOver;
@@ -77,16 +115,27 @@ namespace MOBA.Gameplay
         /// <summary>玩家英雄（只读）。</summary>
         public HeroController PlayerHero => playerHero;
 
-        /// <summary>是否正在复活倒计时中（只读）。</summary>
-        public bool IsHeroRespawning => isRespawning;
+        /// <summary>
+        /// 【玩家英雄】是否正在复活倒计时中（只读）。
+        /// 刻意只反映玩家英雄：这个查询的消费方是复活遮罩 UI，
+        /// 而 AI 英雄阵亡不该在玩家屏幕上弹出"已阵亡"遮罩。
+        /// </summary>
+        public bool IsHeroRespawning => FindRespawnEntry(playerHero) != null;
 
         /// <summary>
-        /// 复活倒计时剩余秒数（只读）。不在倒计时中时恒为 0。
+        /// 【玩家英雄】的复活倒计时剩余秒数（只读）。不在倒计时中时恒为 0。
         /// 【为什么由 UI 每帧读它，而不是每帧广播事件】倒计时是一个连续递减量，
         /// 每帧广播事件等于每帧产生一次委托调用与字符串分配；读一个 float 减法则是零成本。
         /// 事件只负责"开始 / 完成"两个跳变（与技能冷却遮罩同一套取舍）。
         /// </summary>
-        public float RespawnRemaining => isRespawning ? Mathf.Max(0f, respawnEndTime - Time.time) : 0f;
+        public float RespawnRemaining
+        {
+            get
+            {
+                RespawnEntry entry = FindRespawnEntry(playerHero);
+                return entry != null ? Mathf.Max(0f, entry.EndTime - Time.time) : 0f;
+            }
+        }
 
         /// <summary>复活倒计时开始事件：参数为（英雄, 倒计时总时长秒）。</summary>
         public event Action<HeroController, float> OnRespawnCountdownStarted;
@@ -107,10 +156,7 @@ namespace MOBA.Gameplay
 
             // 英雄死亡事件同样在这里订阅：复活倒计时的启停属于对局级编排，
             // 与"对局是否已结束"必须由同一个对象裁决。
-            if (playerHero != null)
-            {
-                playerHero.OnHeroDied += HandleHeroDied;
-            }
+            SubscribeHeroDeathEvents();
         }
 
         /// <summary>
@@ -123,14 +169,87 @@ namespace MOBA.Gameplay
         {
             BaseCoreController.OnBaseDestroyed -= HandleBaseDestroyed;
 
-            if (playerHero != null)
+            UnsubscribeHeroDeathEvents();
+
+            // 被禁用时掐断全部倒计时：协程不会因为 MonoBehaviour.enabled = false 而自动停止，
+            // 留着它们会让"已禁用的对局控制器"仍然把英雄复活。
+            StopRespawnCountdown();
+        }
+
+        /// <summary>
+        /// 订阅全部英雄的死亡事件。
+        /// 采用"先退订再订阅"的写法，保证本方法重复调用（组件被反复启停）时
+        /// 不会造成同一次死亡触发多遍处理。
+        /// </summary>
+        private void SubscribeHeroDeathEvents()
+        {
+            int count = HeroCount;
+
+            for (int i = 0; i < count; i++)
             {
-                playerHero.OnHeroDied -= HandleHeroDied;
+                HeroController hero = GetHero(i);
+                if (hero == null)
+                {
+                    continue;
+                }
+
+                hero.OnHeroDied -= HandleHeroDied;
+                hero.OnHeroDied += HandleHeroDied;
+            }
+        }
+
+        /// <summary>退订全部英雄的死亡事件。与 SubscribeHeroDeathEvents 严格对称。</summary>
+        private void UnsubscribeHeroDeathEvents()
+        {
+            int count = HeroCount;
+
+            for (int i = 0; i < count; i++)
+            {
+                HeroController hero = GetHero(i);
+                if (hero == null)
+                {
+                    continue;
+                }
+
+                hero.OnHeroDied -= HandleHeroDied;
+            }
+        }
+
+        /// <summary>
+        /// 按索引取英雄。
+        /// 数组为空时退化为"只有玩家英雄"，与 HeroCount 的取值口径必须完全一致——
+        /// 两处口径不一致会导致"订阅了 10 个、退订只退了 1 个"这类悬空订阅。
+        /// </summary>
+        /// <param name="index">英雄索引。</param>
+        /// <returns>对应英雄；索引越界或引用为空时返回 null。</returns>
+        private HeroController GetHero(int index)
+        {
+            if (heroes != null && heroes.Length > 0)
+            {
+                return index >= 0 && index < heroes.Length ? heroes[index] : null;
             }
 
-            // 被禁用时掐断倒计时：协程不会因为 MonoBehaviour.enabled = false 而自动停止，
-            // 留着它会让"已禁用的对局控制器"仍然把英雄复活。
-            StopRespawnCountdown();
+            return index == 0 ? playerHero : null;
+        }
+
+        /// <summary>查找某个英雄的复活账目；不在倒计时中返回 null。</summary>
+        /// <param name="hero">待查询的英雄，允许为 null。</param>
+        private RespawnEntry FindRespawnEntry(HeroController hero)
+        {
+            if (hero == null)
+            {
+                return null;
+            }
+
+            for (int i = 0; i < respawnEntries.Count; i++)
+            {
+                if (ReferenceEquals(respawnEntries[i].Hero, hero))
+                {
+                    return respawnEntries[i];
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -143,8 +262,17 @@ namespace MOBA.Gameplay
             if (playerHero == null)
             {
                 Debug.LogWarning(
-                    $"[MatchController] {name} 未指定玩家英雄，英雄阵亡后将不会复活。" +
+                    $"[MatchController] {name} 未指定玩家英雄，玩家英雄阵亡后将不会复活，" +
+                    "HUD 与复活遮罩也拿不到数据源。" +
                     "请执行 MOBA Demo/一键组装测试战场 重新生成场景（该引用由工具注入）。", this);
+            }
+
+            if (heroes == null || heroes.Length == 0)
+            {
+                // 不报错：数组为空时会退化为"只复活玩家英雄"，阶段七生成的旧场景仍可运行。
+                Debug.LogWarning(
+                    $"[MatchController] {name} 未配置英雄数组（Heroes），复活编排将只覆盖玩家英雄。" +
+                    "阶段八的 5v5 场景请执行 MOBA Demo/一键组装测试战场 重新生成（工具会注入全部 10 个英雄）。", this);
             }
 
             if (matchConfig == null)
@@ -414,7 +542,7 @@ namespace MOBA.Gameplay
         }
 
         /// <summary>
-        /// 英雄死亡回调：启动复活倒计时。
+        /// 英雄死亡回调：为该英雄启动一条独立的复活倒计时（阶段八：10 个英雄各自记账）。
         ///
         /// 本类只负责"什么时候复活"，不负责"怎么复活"——后者是 <see cref="HeroController.Revive"/> 的事。
         /// 这样划分的依据：NavMeshAgent / Collider / PlayerCommandController 都是 HeroController.HandleDied
@@ -440,8 +568,10 @@ namespace MOBA.Gameplay
                 return;
             }
 
-            // 防重入：同一时刻只允许一个复活倒计时。
-            if (isRespawning)
+            // 防重入：同一英雄同时只允许一条倒计时。
+            // 与阶段七的差别：闸门从"全局唯一"收紧为"该英雄唯一"——
+            // 10 个英雄可能同时阵亡，全局唯一会让后阵亡者的倒计时被直接吞掉（症状是它永远不复活）。
+            if (FindRespawnEntry(hero) != null)
             {
                 return;
             }
@@ -450,26 +580,32 @@ namespace MOBA.Gameplay
                 ? Mathf.Max(0f, matchConfig.RespawnTime)
                 : Mathf.Max(0f, respawnFallbackTime);
 
-            // 先置状态、再启动协程：StartCoroutine 会【同步】执行协程体到第一个 yield，
-            // 也就是 OnRespawnCountdownStarted 会在赋值语句之前就广播出去；
-            // 若那时才置 isRespawning，订阅方（复活遮罩）读到的会是"没在复活"。
-            isRespawning = true;
-            respawnEndTime = Time.time + delay;
+            RespawnEntry entry = new RespawnEntry
+            {
+                Hero = hero,
+                EndTime = Time.time + delay
+            };
 
-            respawnRoutine = StartCoroutine(RespawnRoutine(hero, delay));
+            // 先入账、再启动协程：StartCoroutine 会【同步】执行协程体到第一个 yield，
+            // 也就是 OnRespawnCountdownStarted 会在赋值语句之前就广播出去；
+            // 若那时才入账，订阅方（复活遮罩）读到的会是"没在复活"。
+            respawnEntries.Add(entry);
+            entry.Routine = StartCoroutine(RespawnRoutine(entry, delay));
         }
 
         /// <summary>
-        /// 复活流程：广播倒计时开始 → 等待 → 调 HeroController.Revive → 广播完成。
+        /// 复活流程：广播倒计时开始 → 等待 → 调 HeroController.Revive → 复位 AI → 广播完成。
         ///
         /// 【为什么 delay 为 0 也走协程】WaitForSeconds(0) 仍会让出至少一帧，
         /// 从而避免"在 HealthComponent.OnDied 的广播链里同步复活"——
         /// 那会让排在后面的订阅者收到"一个已经活过来的英雄的死亡事件"，状态自相矛盾。
         /// </summary>
-        /// <param name="hero">阵亡的英雄。</param>
+        /// <param name="entry">本次复活的账目（承载英雄与复活时刻）。</param>
         /// <param name="delay">倒计时时长（秒）。</param>
-        private IEnumerator RespawnRoutine(HeroController hero, float delay)
+        private IEnumerator RespawnRoutine(RespawnEntry entry, float delay)
         {
+            HeroController hero = entry.Hero;
+
             if (logMatchEvents)
             {
                 Debug.Log($"[MatchController] {hero.HeroDisplayName} 已阵亡，{delay:F1} 秒后在出生点复活。", this);
@@ -479,8 +615,8 @@ namespace MOBA.Gameplay
 
             yield return new WaitForSeconds(delay);
 
-            respawnRoutine = null;
-            isRespawning = false;
+            // 先出账：此后任何"是否正在复活"的查询都不应再看到这条记录。
+            respawnEntries.Remove(entry);
 
             // 倒计时期间对局可能已经结束：此时不能再把英雄放出来。
             // 【必须用 yield break 而不是 return】本方法是迭代器，C# 不允许在迭代器块里写普通的 return;（CS1622）。
@@ -497,24 +633,37 @@ namespace MOBA.Gameplay
 
             if (hero.Revive())
             {
+                // 阶段八：AI 英雄的 FSM 停在 DeadState（单向终态，无出口），必须显式复位，
+                // 否则症状是"复活了、看得见、也能被点中，但永远站着不动、不还手"，且 Console 一片安静。
+                // 玩家英雄刻意不挂 EntityAIController，GetComponent 返回 null，天然跳过这一步。
+                EntityAIController ai = hero.GetComponent<EntityAIController>();
+                if (ai != null)
+                {
+                    ai.ReviveAI();
+                }
+
                 OnRespawnCompleted?.Invoke(hero);
             }
         }
 
         /// <summary>
-        /// 掐断复活倒计时（对局结束、组件被禁用时调用）。幂等。
+        /// 掐断全部复活倒计时（对局结束、组件被禁用时调用）。幂等。
         /// 只清状态与协程句柄，不广播任何事件 —— 调用方（对局结束）自己会给出更强的视觉结论（结算界面）。
         /// </summary>
         private void StopRespawnCountdown()
         {
-            if (respawnRoutine != null)
+            for (int i = 0; i < respawnEntries.Count; i++)
             {
-                StopCoroutine(respawnRoutine);
-                respawnRoutine = null;
+                RespawnEntry entry = respawnEntries[i];
+
+                if (entry.Routine != null)
+                {
+                    StopCoroutine(entry.Routine);
+                    entry.Routine = null;
+                }
             }
 
-            isRespawning = false;
-            respawnEndTime = 0f;
+            respawnEntries.Clear();
         }
 
         // ------------------------------------------------------------------

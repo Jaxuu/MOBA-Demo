@@ -24,7 +24,14 @@
 - **阶段一 ~ 五**：数据驱动属性、组件装配、NavMesh 寻路、FSM 小兵 AI、塔 / 基地 / 兵线 / 胜负闭环，以及英雄右键指令层、顶视角相机与一键自动化战场组装（纯白盒形态）。
 - **阶段六 6A（技能系统与战斗拓展）**：技能数据 / 效果 / 执行 / 表现四层落地，Q/W 首批技能、弹道、范围减速、法力与 Buff/Debuff、一键组装步骤 13~16 全部就位，**实机验收通过**；**6B（防御塔仇恨优先级）按裁决顺延**。
 - **阶段七（信息可视化与对局 UI）**：世界空间血条、伤害飘字、玩家 HUD（血 / 蓝条 + Q/W 技能槽与 CD 径向遮罩）、小地图、击杀播报与计分板、英雄复活倒计时与出生点重生全部落地，**实机验收通过**；`AutoSceneBuilder` 步骤 17 可一键装配全套 UI 并注入全部引用（零手工拖拽）。
-- **下一步：阶段八（美术表现与表现层分离）**——模型替换、Animator 状态机、特效与音效、场景美术。
+- **下一步：阶段八（嚎哭深渊机制与 5v5 团战拓展）**——单线桥梁地图、双方共 6 座激活防御塔（含 6B 塔仇恨落地）、10 英雄 5v5（1 玩家 + 9 AI）、玩家英雄 QWER 四技能、AI 英雄技能池随机分配、兵线节奏调整。原"美术表现"阶段顺延为**阶段九**。
+  - **第一步（桥梁地形 + 6 塔 + 10 英雄）**：已落地。
+  - **第二步（QWER 重构 + 技能池 + AI 技能决策）**：代码已全部落盘，**待重跑菜单 + 实机复验**。同批修掉了第二轮实机暴露的地图寻路 / 碰撞问题（场景未落盘、兵线与塔洞共线、英雄与兵线共用一条线、避让优先级全同、`stoppingDistance = 0`、路径点被占住时永久停滞），详见《MOBA_Demo_Plan.md》阶段八 §（10）。
+- **阶段九（美术表现与表现层分离）**：**表现层框架已就位** —— `AnimationComponent`（逻辑状态 → Animator 参数的单向映射）、
+  `SimpleObjectPool` + `PooledVfxInstance` + `VfxSpawner`（特效对象池与事件驱动的播放 / 自动回收）、
+  代码生成的 `UnitAnimator.controller`（Idle / Run / Attack / Spell / Die 五状态骨架，暂不含动画片段）、
+  以及真实 3D 模型与特效预制体的**预留槽位**与读回校验。
+  **下一步：导入 3D 模型、动画片段与特效资源**（导入后重新执行一键组装即自动接入，无需手工拖引用）。
 
 **版本定位**：单机离线运行，**不涉及**网络同步、预测回滚与服务器权威。
 
@@ -54,15 +61,16 @@
 
 | 技能形态 | 需求描述 |
 |---|---|
-| **指向性技能** | 锁定一个敌方目标 → 发射**弹道（Projectile）**，弹道有真实飞行时间，**命中时**结算伤害与效果 |
-| **非指向性 AOE 技能** | 指定方向/落点 → 在半径范围内收集所有敌方单位并结算伤害（可含延迟生效的表现前摇） |
-| **辅助 / 控制技能** | 对指定友方施加护盾，或对指定敌方施加控制（定身 / 减速 / 眩晕） |
-| **Buff / Debuff** | 基础状态效果：**减速、眩晕**等；支持持续时间、到期自动解除、重复施加的刷新策略 |
-| **CD 与蓝耗管理** | 冷却时间、法力消耗、施法距离校验；CD 中 / 蓝量不足 / 超距 / 目标非法时**拒绝释放且无任何副作用** |
+| **指向性技能** | 锁定一个敌方目标 → 发射**弹道（Projectile）**（真实飞行时间、**命中时**结算），或**即时结算**的指向性爆发（阶段八新增，如 R 斩杀） |
+| **非指向性 AOE 技能** | 指定方向/落点 → 半径范围内收集所有敌方单位并结算；阶段八新增**以自身为中心并跟随移动**的持续 AOE（如 E 审判） |
+| **自身增益技能（Self 施法）** | 无需目标与落点：移速提升、护盾 / 减伤、强化下一次普攻（阶段八新增 `SkillCastType.Self`） |
+| **辅助 / 控制技能** | 对指定友方施加护盾/治疗，或对指定敌方施加控制（减速 / 眩晕 / **沉默**） |
+| **Buff / Debuff** | 基础状态效果：**减速、眩晕、沉默、加速、护盾、减伤、强化普攻**；支持持续时间、到期自动解除、重复施加的刷新策略 |
+| **CD 与蓝耗管理** | 冷却时间、法力消耗、施法距离校验；CD 中 / 蓝量不足 / 超距 / 目标非法 / 被沉默时**拒绝释放且无任何副作用** |
 
-**首批技能规划**（阶段六实测项）：`Q` = **指向性非穿透弹道**（锁定敌方单位 → 发射火球 → 命中时结算伤害并销毁）；`W` = **非指向性 AOE 减速圈**（指定地面落点 → 生成持续范围效果 → 周期施加减速）。
+**技能槽位规划**：阶段六首批 Q/W 两个槽位已实机验收（`Q` = 指向性非穿透弹道、`W` = 非指向性 AOE 减速圈）。**阶段八起，玩家英雄扩展为 Q / W / E / R 四槽位**（盖伦式机制，见 §2.1.6）；9 个 AI 英雄从技能池随机分配技能（固定随机种子，保证组装幂等）。
 
-> 槽位与形态的对应关系曾在草案阶段被互换，**以本节为最终口径**（架构本身对两种形态均支持，只是资产配置不同）。
+> 槽位与形态的对应关系曾在草案阶段被互换，**以本节为最终口径**（架构本身对各种形态均支持，只是资产配置不同）。
 
 #### 2.1.3 防御塔机制
 
@@ -77,6 +85,7 @@
 | 4 | 塔**同一时刻只攻击一个目标**；目标重评估按节流周期（≤0.25s）执行，禁止每帧重算 |
 
 - 塔的攻击索敌半径 = `CombatComponent.AttackRange`（塔不持有独立索敌半径）。
+- **阶段八起塔全面激活**（双方各 3 座，共 6 座）：上述仇恨优先级（原 6B 顺延项）正式落地，且塔普攻改为**弹道攻击**（真实飞行时间、命中时结算）。
 
 #### 2.1.4 核心循环
 
@@ -86,6 +95,12 @@
 ```
 
 - 兵线：一"方"一条兵线（阵营 + 出生点 + `LanePath` 三者绑定），蓝红用**节点顺序相反**表达推进方向。
+  - **阶段八起每方有两条推进线**：**小兵兵线**（`BlueLane` / `RedLane`）与**英雄推进线**（`BlueHeroLane` / `RedHeroLane`）。
+    两者共用同一份节点 X 序列（`LaneWaypointX`），只沿 Z 分处桥心两侧（小兵 **+2.5** / 英雄 **−2.5**）。
+    分开的原因是空间约束：桥面可行走半宽只有 6.5 米、塔洞两侧通行带各 5.2 米，
+    10 个英雄与两条兵线挤在同一条宽度为 0 的直线上会互相顶死。
+    偏心的另一个必要理由是**消除绕行方向的二义性**：塔洞挖在 z = 0，
+    节点若也在 z = 0，则"向左绕 / 向右绕"完全等价，NavMesh 每次重算都可能翻面（见 `MOBA_Demo_Plan.md` 阶段八 §（10）问题 B）。
 - 终结：任一方基地生命值归零，判定胜负、冻结战场、显示对局结果。
 
 #### 2.1.5 对局信息与玩家心流
@@ -96,6 +111,21 @@
 | **击杀播报** | 屏幕顶部播报击杀事件（谁击杀了谁），带队列与自动淡出 |
 | **计分板** | 双方击杀数/死亡数实时统计与显示 |
 | **小地图** | 将世界坐标映射到小地图，显示双方单位/建筑/英雄位置 |
+
+#### 2.1.6 嚎哭深渊与 5v5 团战（阶段八新增）
+
+对标《英雄联盟》"嚎哭深渊 (ARAM)"的单线团战体验，把"单英雄 + 兵线"升级为 5v5 英雄对抗：
+
+| 维度 | 需求描述 |
+|---|---|
+| **地图形态** | 地面横向拉长为**单线桥梁地形**（120 × 14 米）；双方基地之间各新增 2 座防御塔（共 4 座，连同原有 2 座合计 6 座），一条兵线直通对方基地。**桥面的可行走宽度必须小于「塔攻击距离 × 2」**——这是"单线推塔"成立的前提：否则单位可以贴着桥沿从两侧绕开全部防御塔，塔形同虚设 |
+| **建筑阻挡** | 防御塔与基地必须**物理上挡路**：导航网格在它们所在处天然挖空，单位只能绕行或先拆塔，不允许出现"从塔体里穿过去"的穿模。<br>**机制说明（避免误解为靠物理碰撞）**：`NavMeshAgent` **不参与物理碰撞**（单位预制体既无 `Rigidbody` 也无 `CharacterController`），因此"挡路"这件事只能由**导航网格**表达——塔与基地的外观体被放到专属的 `Building` 层，NavMesh 烘焙时按层掩码把它们收进去并抠成空洞。<br>建筑的 `Collider` 与单位的 `Collider` 仍然**必须有效**，但它们的职责是"能被索敌（`OverlapSphere`）与右键拾取（`Raycast`）命中"，不是挡路；组装工具对两者各有一道断言（几何源数量 ≥ 地面 1 + 建筑 8、`ValidateBuildingCarve` 逐个采样建筑中心必须不可行走） |
+| **5v5 英雄** | 战场共 **10 个英雄**，编制被严格固定为**蓝方 1 名玩家英雄 + 4 名 AI、红方 5 名 AI**（`PlayerHeroCount` / `BlueAiHeroCount` / `RedAiHeroCount` 三个常量相加，收尾校验会回场景里重新数一遍）；其余 9 个由 `HeroAIController` 接管——移动 / 追击 / 平A 与小兵 AI 同源（FSM），并会按射程与 CD **自动释放技能** |
+| **玩家英雄 QWER** | 盖伦式四技能：`Q` 加速 + 强化下次普攻（额外伤害 + 沉默）、`W` 立即护盾 / 减伤、`E` 跟随自身的持续 AOE、`R` 指向性斩杀（按目标已损失生命值加成伤害）。**这套技能是玩家专属**：只有 `BlueHero_0` 使用，任何 AI 英雄都不得继承（收尾校验会读回 9 个 AI 的技能槽逐格核对资产路径） |
+| **AI 技能池** | 玩家 QWER 之外的一批基础技能组成**10 技能池**（火球、寒霜领域、治疗术、眩晕弹、冲击波、护盾术、疾行术、处决、自爆冲击、远程狙击）；一键组装时给 9 个 AI 英雄**各抽 4 个不同技能**（无放回）挂入 Q / W / E / R，用固定种子（`new System.Random(2026 + 序号 × 7919)`）保证工具幂等，验证技能架构泛用性 |
+| **兵线节奏** | 小兵生成间隔（Spawn Interval）延长为原来的 **2 倍**（战斗密度让位于英雄对抗） |
+| **复活** | 全部 10 个英雄共享阶段七的复活机制（倒计时 → 各自出生点重生），不再只覆盖玩家英雄 |
+| **白盒视觉反馈**<br>（实机修复新增） | 团战必须做到"一眼分清敌我、一眼看到技能生效"，否则 5v5 无法测试：<br>① **实体配色 = 「阵营 × 单位类型」四格表**，由 `TeamColorView` 在**运行期**读 `EntityBase.Team` + `EntityBase.EntityType` 选材质：蓝方英雄 **蓝** / 红方英雄 **红** / 蓝方小兵 **白** / 红方小兵 **黑**（建筑沿用各自材质，不在表内）。英雄与小兵共用这一套逻辑、各自只有一个写入者——上一版"英雄在编辑期写实例覆写、小兵在运行期选材质"是同一件事的两个写入者，且玩家英雄被留成绿色，团战里根本分不清"那坨蓝的是 4 个小兵还是 1 个英雄"。<br>② **头顶血条默认常显**（`hideWhenFull = false`，由工具显式写入）——满血隐藏会让刚复活 / 刚回满血的英雄完全没有血条，实机上会被误读成"英雄压根没挂血条"。<br>③ **技能占位特效** `WhiteboxVfxManager`：订阅全部英雄的 `SkillComponent.OnSpellReleased`，用引擎图元生成临时几何体。分派依据是 `SkillData` 的**语义字段**（`castType` / `effectType` / `spawnZoneAtSelf` / `followCaster`）而**不是 Q/W/E/R 槽位**——9 个 AI 英雄的 4 个技能各不相同，按槽位写死会让特效整体错位。效果：自身增益 = 施法者临时变黄、护盾 = 身上的半透明淡蓝球（跟随，护盾消失即回收）、范围场 = 脚下压扁的半透明圆柱（`followCaster` 时随人移动）、斩杀 = 目标头顶落下的金色巨柱（弹道类按"距离 / 速度"延迟出现）、友方目标 = 淡绿脉冲、其余 = 白色兜底脉冲。<br>**边界**：占位物一律**无 `Collider`** 且位于 `Ignore Raycast` 层（`CreatePrimitive` 自带的碰撞体会拦截右键拾取射线）；表现层可整体关闭，对局结果与胜负完全不变 |
 
 ---
 
@@ -113,11 +143,19 @@
 |---|---|
 | `Idle` 待机 | 无移动输入、无攻击/施法 |
 | `Run` 移动 | 移动速度 > 阈值 |
-| `Attack` 攻击 | 攻击指令执行中 |
-| `Death` 死亡 | 生命归零（只播一次） |
+| `Attack` 攻击 | 攻击指令执行中（`CombatComponent.OnAttackPerformed`） |
+| `Spell` 施法 | 技能前摇开始（`SkillComponent.OnCastStarted`） |
+| `Die` 死亡 | 生命归零（只播一次） |
 
 - 移动/待机由**速度参数**（float `Speed`）驱动过渡，不硬切状态，避免移动↔待机抖动。
-- `Spell`（施法）动画可作为扩展状态接入，同一套映射机制。
+  速度取 `MovementComponent.CurrentVelocity` 的模长并按配置移速归一化（0 = 静止 / 1 = 满速），
+  因此减速、眩晕、前摇锁定、窄道拥堵都会自然地落回 `Idle`。
+- `Spell` 施法状态已按同一套映射机制实装（阶段九）。
+- **参数与状态名以 `Assets/Art/Animations/UnitAnimator.controller` 为准**：`Speed`(float) /
+  `Attack` / `Spell` / `Die`(trigger)，五个状态与六条过渡由一键组装工具生成（`AutoSceneBuilder.Stage9Assembly`）。
+  阶段九只生成**骨架**（不含动画片段），美术资源导入后把片段拖到对应状态即可，逻辑代码零改动。
+- **Animation Event 只能触发表现**（特效 / 音效），**严禁**用它回调伤害结算或修改任何战斗数值
+  （见 §3.4 约束 2）；`AnimationComponent` 不订阅任何 Animation Event，这条约束在代码结构上就成立。
 
 #### 2.2.3 视觉特效与音效
 
@@ -171,14 +209,22 @@
 | Entity 层 | 身份、阵营、配置、组件引用聚合 | `EntityBase` |
 | Component 层 | 单一能力（生命、移动、战斗、目标、技能、动画） | `HealthComponent`、`MovementComponent`… |
 | System 层 | 编排与驱动（AI、指令、对局、生成） | `EntityAIController`、`MatchController` |
-| Presentation 层 | 只读订阅事件并播放表现 | `WorldHealthBarView`、`VfxSpawner` |
+| Presentation 层 | 只读订阅事件并播放表现 | `WorldHealthBarView`、`TeamColorView`、`AnimationComponent`、`VfxSpawner`、`WhiteboxVfxManager`（白盒占位实现，美术资源接入后整体删除） |
 
 > **关于 `Projectile` / `AreaEffectZone` 的层级归属（阶段六裁定）**：
 > 本表原先把 `Projectile` 列在 Presentation 层，与 §3.4 铁律 4「表现层可整体关闭，对局逻辑与胜负结果必须完全一致」**直接冲突**——
 > 若弹道属于表现层，那么关掉它就等于关掉所有指向性技能的伤害，胜负结果必然改变。
 > 因此明确：两者是**效果层在运行期的载体**（弹道负责飞行与到达判定、范围场负责周期 tick），属于**逻辑**；
-> 其**视觉部分**（弹道外观、命中特效）由视觉子物体与阶段八的 `VfxSpawner` 承担。
+> 其**视觉部分**（弹道外观、命中特效）由视觉子物体与表现层承担 —— 阶段八白盒期是
+> `WhiteboxVfxManager`（引擎图元占位，见 §2.1.6），阶段九替换为 `VfxSpawner` + 正式美术资源。
 > 判定「某类型算逻辑还是表现」的统一标准就是铁律 4：**关掉它，对局结果会不会变**。
+>
+> **推论（硬性约定）**：弹道预制体**严禁带 `Collider`**。它的命中判定走自研距离检测
+> （`Projectile` 内比较与追踪点的距离，不使用 `Rigidbody` / `OnTriggerEnter`），
+> 带碰撞体会让弹道出现在 `Physics.OverlapSphere` 的索敌结果与右键拾取里 ——
+> 表现为"弹道成了可被点选/锁定的候选单位"。组装工具在生成弹道预制体时会主动移除 `SphereCollider`。
+> 单位与建筑则相反：**必须有 `Collider`**，否则永远不会出现在任何一次索敌结果里
+> （`EntityBase.ValidateDependencies` 会对缺失者告警）。
 
 ### 3.2 FSM 有限状态机
 
@@ -198,13 +244,30 @@
 
 ```text
 逻辑层（权威）  ──单向广播事件──▶  表现层（只读、可丢失）
-CombatComponent / SkillComponent / HealthComponent
+CombatComponent / SkillComponent / HealthComponent / Projectile
         │
-        ├─ OnAttackPerformed ─▶ 播放攻击动画 + 特效 + 音效
-        ├─ OnDamaged         ─▶ 受击特效 + 伤害飘字 + 血条刷新
-        ├─ OnDied            ─▶ 死亡动画 + 播报 + 复活倒计时
-        └─ OnSpellCast       ─▶ 施法动画 + 技能特效
+        ├─ OnAttackPerformed        ─▶ 攻击动画（阶段九补齐）
+        ├─ OnDamaged                ─▶ 受击特效 + 伤害飘字 + 血条刷新
+        ├─ OnHealthChanged          ─▶ 血条刷新
+        ├─ OnDied                   ─▶ 死亡动画 + 播报 + 复活倒计时
+        ├─ OnCastStarted            ─▶ 施法动画 + 施法特效（校验通过、扣蓝起 CD 之后）
+        ├─ OnSpellReleased          ─▶ 释放特效 / 音效（前摇结束、效果真正生效时）
+        ├─ OnProjectileSpawned      ─▶ 订阅该发弹道的 OnHit（阶段九补齐）
+        ├─ Projectile.OnHit         ─▶ 弹道命中特效（带真实命中点）
+        └─ OnBuffApplied / OnBuffExpired ─▶ 状态效果表现
 ```
+
+> **事件名以代码为准（阶段九自审校准）**：上表全部是**当前代码里真实存在**的事件名，
+> 可直接在组件上查到（`CombatComponent.OnAttackPerformed`、
+> `HealthComponent.OnDamaged` / `OnHealthChanged` / `OnDied`、
+> `SkillComponent.OnCastStarted` / `OnSpellReleased`、`BuffComponent.OnBuffApplied` / `OnBuffExpired`、
+> `HeroController.OnHeroDied` / `OnHeroRespawned`、`Projectile.OnHit`、`ProjectileSpawner.OnProjectileSpawned`）。
+> **注意没有 `OnSpellCast` 这个事件**：技能侧真实存在的是 `OnCastStarted` / `OnSpellReleased` 这一对，
+> 动画订阅前者（前摇开始即摆动作）、特效订阅后者（效果落地才炸开）。
+> **`OnAttackPerformed` 是阶段九补齐的**：阶段八讨论受击反馈时明确写过「本项目明令不留没有消费方的僵尸事件」，
+> 因此当时刻意没造；阶段九的 `AnimationComponent`（Attack 触发）是它的第一个消费方，于是现在补齐。
+> 它的语义边界是「**打出去了**」而不是「打中了」（塔的普攻弹道在发射时就广播、命中时才结算伤害），
+> 「命中反馈」仍由 `OnDamaged` / `Projectile.OnHit` 承担。
 
 **硬性约束：**
 
@@ -221,14 +284,18 @@ CombatComponent / SkillComponent / HealthComponent
 |---|---|---|
 | **数据层** | 技能的全部可配置参数：标识、图标、冷却、蓝耗、施法距离、目标类型、效果类型、数值、持续时间 | `SkillData`（`ScriptableObject`） |
 | **效果层** | 原子化效果与目标选择：伤害、护盾、控制（减速/眩晕）、位移；目标选择器（范围内敌方 / 指定目标 / 指定友方） | `SkillEffect` 枚举 + 目标选择器 |
-| **执行层** | **唯一施放入口** `SkillComponent.TryCast(slot, groundPoint, target, out failReason)`：校验 CD → 蓝量 → 施法距离 → 目标合法性 → 扣蓝 → 起 CD → 执行效果 → 广播 `OnSpellCast`。`failReason` 在拒绝时给出可读原因（冷却 / 法力 / 距离 / 目标非法 / 前摇硬直），供输入层打日志 | `SkillComponent` |
-| **表现层** | 订阅 `OnSpellCast` 播放施法动画、技能特效与音效 | `VfxSpawner`、`AnimationComponent` |
+| **执行层** | **唯一施放入口** `SkillComponent.TryCast(slot, groundPoint, target, out failReason)`：校验 CD → 蓝量 → 施法距离 → 目标合法性 → 扣蓝 → 起 CD → 执行效果 → 广播 `OnCastStarted`（进入前摇）/ `OnSpellReleased`（效果真正生效）。`failReason` 在拒绝时给出可读原因（冷却 / 法力 / 距离 / 目标非法 / 前摇硬直 / 被沉默），供输入层打日志 | `SkillComponent` |
+| **表现层** | 订阅 `OnCastStarted`（进入前摇）/ `OnSpellReleased`（效果真正生效，且只在真的生成了效果载体时才广播）播放施法动画、技能特效与音效；目标是谁读只读属性 `SkillComponent.LastCastTarget` | `WhiteboxVfxManager`（白盒占位实现，阶段八实机修复新增）、`AnimationComponent`（阶段九） |
 
 设计边界（**刻意不做**，避免过度设计）：
 
 - 不建技能行为树、不做连招编辑、不做技能打断/蓄力/多段。
-- Buff/Debuff 只做**基础状态效果**（减速、眩晕 + 护盾），不做完整属性修饰器聚合体系。
-- 首批技能只支持 Q / W 两个槽位，槽位机制预留扩展。
+- Buff/Debuff 只做**基础状态效果**，不做完整属性修饰器聚合体系。
+  阶段六：减速 / 眩晕 / 护盾；**阶段八新增**：加速（`Haste`）、沉默（`Silence`，只封施法不影响移动与普攻）、
+  强化下一次普攻（`EmpowerNextAttack`，一次性状态、命中即消耗）。
+  **移速修饰的规则**：减速与加速**共用同一份原速快照**，两个系数**相乘**（因此结果与施加顺序无关），
+  只有两个修饰器都解除才作废快照并恢复原速。
+- 首批技能（阶段六）只实装 Q / W 两个槽位；**阶段八扩展为 Q / W / E / R 四槽位**，并新增 `SkillCastType.Self`、强化普攻、斩杀、治疗等效果（见 §2.1.6）。仍不建行为树与连招编辑。
 
 ### 3.6 网络约定
 
@@ -240,8 +307,8 @@ CombatComponent / SkillComponent / HealthComponent
 
 ### 4.1 玩家英雄 (Player Hero)
 
-- 唯一的玩家输入接收者（右键移动/攻击 + 技能释放）。
-- 行为完全由玩家指令层驱动，**不挂载 `EntityAIController`**。
+- 唯一的玩家输入接收者（右键移动/攻击 + 技能释放）；**阶段八起技能槽位为 Q / W / E / R 四个**。
+- 行为完全由玩家指令层驱动，**不挂载 `EntityAIController`**（此约束只针对玩家英雄；AI 英雄见 §4.5）。
 - 死亡后：停寻路 → 清目标 → 禁用指令层 → 禁用 `NavMeshAgent` 与 `Collider` → 取消可选中 → 进入复活倒计时 → 出生点重生。
 
 ### 4.2 双方小兵 (Minions)
@@ -251,6 +318,11 @@ CombatComponent / SkillComponent / HealthComponent
   1. **寻路**：沿指定的 `LanePath`（兵线路径点）推进。
   2. **索敌**：在检测半径（Detection Range）内发现有效敌人。
   3. **追击**：脱离兵线追踪敌人，但不得超过最大追击半径与牵引锚点距离。
+     - **「看得见」与「值得脱线」是两个半径，不可合并**：索敌半径（Detection Range）回答"能不能发现敌人"；
+       追击发起半径（Chase Engage Range）回答"值不值得离开兵线去打"。只有敌人在**追击发起半径**内才允许脱线。
+       索敌半径必须远大于追击发起半径（地图越长，视野越要大，但脱线范围必须始终贴着兵线）——
+       两者合并会导致单位为了几十米外的敌人整段脱线，表现为"全队反复进出兵线、在兵线节点上聚团发呆"。
+     - 派生关系：放弃追击距离 = 追击发起半径 × 1.5；牵引极限距离 = 追击发起半径 × 2.0（滞回关系不变）。
   4. **攻击**：进入射程后停止移动并攻击。
   5. **丢失/击杀目标**：目标超出追击半径或死亡后重新寻找目标；无目标则返回兵线继续推进。
 
@@ -263,6 +335,17 @@ CombatComponent / SkillComponent / HealthComponent
 
 - 不可移动、不可攻击实体，仅作为胜负判定的载体，只广播"被摧毁"事件，不自行判定胜负。
 
+### 4.5 AI 英雄 (AI Hero，阶段八新增)
+
+- 与玩家英雄**共用同一英雄预制体与 `HeroController`**（死亡收尾 / 复活链路一致）。
+- 挂载 `EntityAIController`（移动 / 追击 / 平A 复用小兵同源 FSM 与防震荡不变量）+ `HeroAIController`（**只做技能决策**：节流扫描已分配技能并调用 `TryCast`，不直接写 `Movement` / `Combat`，避免与 FSM 双写）。
+- 技能由自动化工具从技能池**按实例注入**（固定种子随机分配），不走共享的 `EntityStatsData`。
+  **这是硬约束，不是"顺手这么写"**：技能槽的规则是「**实例整体接管，模板只服务全新单位**」——
+  只要 `SkillComponent` 上已有任意一个槽位配置，运行期就一个槽都不写。
+  反例（实机踩过）：10 个英雄共用同一份 `HeroStats`，若允许共享模板在 Start 时注入技能槽，
+  9 个 AI 会被整体改写成玩家那套盖伦 QWER（症状：AI 全在转大风车 / 劈大宝剑，而编辑器里看它们的技能槽完全正确）。
+  配套：一键组装会**清空** `EntityStatsData` 上的四个技能字段并给出说明，AI 英雄在 Start 时会把最终生效的四个技能打进 Console（运行期证据）。
+
 ---
 
 ## 5. 目录结构规范
@@ -272,9 +355,9 @@ CombatComponent / SkillComponent / HealthComponent
 ```text
 Assets/
 ├── Art/                            # 美术资产总目录
-│   ├── Models/                     # 🆕 角色与建筑模型（Heroes / Minions / Towers / Bases）
-│   ├── Materials/                  # ✅ 地面、角色、阵营材质
-│   ├── Animations/                 # 🆕 动画片段与 AnimatorController
+│   ├── Models/                     # 🆕 角色与建筑模型（阶段九已预留 Heroes / Minions / Buildings 三个目录与约定路径，模型待导入）
+│   ├── Materials/                  # ✅ 地面、角色、阵营材质（含阶段八四格配色材质）
+│   ├── Animations/                 # 🆕 动画片段与 AnimatorController（阶段九已生成 UnitAnimator.controller 骨架，片段待导入）
 │   ├── VFX/                        # 🆕 攻击、受击、技能特效
 │   └── Textures/                   # 🆕 地面贴图与 UI 贴图
 ├── Audio/                          # 🆕 音频资产
@@ -284,30 +367,31 @@ Assets/
 │   ├── MainScene.scene             # ✅ 主玩法场景（团结引擎扩展名 .scene）
 │   └── Test/                       # 🆕 可选：分系统测试场景
 ├── Scripts/
-│   ├── Core/                       # ✅ EntityBase、枚举、接口、EntityRegistry
-│   ├── Components/                 # ✅ Health / Movement / Combat / Targeting
-│   │                               # 🆕 Mana / Skill / Animation / Buff
+│   ├── Core/                       # ✅ EntityBase、枚举、接口、EntityRegistry、PrefabPool
+│   ├── Components/                 # ✅ Health / Movement / Combat / Targeting / Mana / Skill / Buff
+│   │                               # 🆕 Animation（阶段九：逻辑状态 → Animator 参数，唯一引用 Animator 的组件）
 │   ├── Controllers/                # ✅ PlayerCommandController、CameraController
 │   ├── AI/                         # ✅ FSM、EntityAIController、States
 │   ├── Units/                      # ✅ Hero / Minion / Tower / BaseCore
-│   ├── Skills/                     # 🆕 技能数据与效果实现（阶段六）
+│   ├── Skills/                     # ✅ 技能数据与效果实现（阶段六 / 八）
 │   ├── Gameplay/                   # ✅ LanePath、MinionSpawner、MatchController
-│   ├── UI/                         # ✅ MatchResultView
-│   │                               # 🆕 血条 / 飘字 / HUD / 小地图 / 播报 / 计分板 / 复活
-│   ├── VFX/                        # 🆕 弹道、特效生成、对象池（阶段八）
+│   ├── UI/                         # ✅ 血条 / 飘字 / HUD / 小地图 / 播报 / 计分板 / 复活
+│   ├── VFX/                        # ✅ TeamColorView（阵营×类型四格配色）、WhiteboxVfx*（白盒占位）
+│   │                               # 🆕 SimpleObjectPool / PooledVfxInstance / VfxSpawner（阶段九正式特效层）
 │   ├── Debug/                      # ✅ 调试可视化（FSM / Match / 塔仇恨）
 │   └── Editor/                     # ✅ AutoSceneBuilder 等编辑器工具（自动化铁律的执行者）
 ├── ScriptableObjects/
 │   ├── EntityStats/                # ✅ 英雄、小兵、防御塔、基地基础属性
 │   ├── Attacks/                    # ✅ 普攻伤害、距离、间隔配置
-│   ├── Skills/                     # 🆕 Q / W 技能配置（阶段六）
+│   ├── Skills/                     # ✅ 技能配置：玩家 QWER + 技能池 Pool/（阶段八）
 │   ├── Spawns/                     # ✅ 波次、数量、间隔配置
 │   └── Match/                      # ✅ 对局规则配置
 ├── Prefabs/
 │   ├── Characters/                 # 🆕 Heroes / Minions
 │   ├── Buildings/                  # 🆕 Towers / Bases
 │   ├── UI/                         # 🆕 血条、飘字、HUD、小地图
-│   └── VFX/                        # 🆕 弹道、受击、技能特效
+│   └── VFX/                        # ✅ Projectile.prefab
+│                                   # 🆕 HitVfx / CastVfx / ProjectileHitVfx（阶段九预留槽位，导入后重新组装即自动注入）
 └── Settings/
     ├── Input/
     └── NavMesh/
@@ -338,9 +422,10 @@ Assets/
 | 三 | 小兵 FSM 与自动交战 | ✅ 已完成 |
 | 四 | 防御塔、兵线生成与胜负闭环 | ✅ 已完成 |
 | **五** | **英雄控制与自动化基建** | ✅ **已完成** |
-| **六** | **技能系统与战斗拓展（核心玩法闭环）** | ✅ **6A 已完成**（实机验收通过）；6B（塔仇恨）顺延 |
+| **六** | **技能系统与战斗拓展（核心玩法闭环）** | ✅ **6A 已完成**（实机验收通过）；6B（塔仇恨）并入阶段八 |
 | **七** | **信息可视化与对局 UI（玩家心流体验）** | ✅ **[x] 已完成**（2026-09-25 封版，实机验收通过） |
-| **八** | **美术表现与表现层分离（最终商业化包装）** | ⏳ 待开发（**下一步**） |
+| **八** | **嚎哭深渊机制与 5v5 团战拓展** | 🚧 **第一 / 二 / 三步代码已落地**（桥梁地形 / 6 塔 / 10 英雄编制强控 5v5 / 玩家专属 QWER / 10 技能 AI 池 × 4 槽 / 四格实体配色 / 地图寻路与碰撞修复），**待实机验收与封版** |
+| **九** | **美术表现与表现层分离（最终商业化包装）** | 🚧 **表现层框架已就位**（`AnimationComponent` 逻辑→动画单向映射 / `SimpleObjectPool` + `PooledVfxInstance` + `VfxSpawner` 特效池 / `UnitAnimator.controller` 五状态骨架 / 模型与特效槽位预留 + 读回校验），**3D 美术资产待导入** |
 
 各阶段的输入、开发范围与**量化验收标准**详见 `MOBA_Demo_Plan.md` 第 5 章。
 
@@ -352,8 +437,10 @@ Assets/
 
 - 多人网络同步、匹配、断线重连、观战回放。
 - 装备与经济系统（金币掉落、商店购买、合成）。
-- 多兵线、野区、中立生物、战争迷雾与视野遮挡。
+- 多兵线、野区、中立生物、战争迷雾与视野遮挡（嚎哭深渊为**单线**玩法，多兵线仍在范围外）。
 - 英雄等级成长、天赋符文、召唤师技能。
+- 英雄选择 / 阵容搭配界面（AI 英雄技能由工具随机分配，玩家英雄固定 QWER）。
+- 多英雄玩家控制（玩家始终只操控 1 个英雄，其余为 AI）。
 - 技能连招 / 蓄力 / 多段位移等进阶技能机制。
 
-> 说明：V1.0 曾将"技能系统"与"对象池"列为 Out of Scope，**现已全部纳入范围**（技能见阶段六，最小可用对象池见阶段八）。
+> 说明：V1.0 曾将"技能系统"与"对象池"列为 Out of Scope，**现已全部纳入范围**（技能见阶段六，最小可用对象池见阶段九）。

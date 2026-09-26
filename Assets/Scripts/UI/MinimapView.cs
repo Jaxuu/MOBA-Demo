@@ -50,8 +50,10 @@ namespace MOBA.UI
         [Tooltip("战场中心（世界 XZ，取 X 与 Z 两个分量）。由工具按地面覆盖范围注入。")]
         [SerializeField] private Vector2 worldCenter = Vector2.zero;
 
-        [Tooltip("战场尺寸（世界 XZ）。地面是 38×38，工具会按同一份包围盒注入，保证小地图与可行走区域一致。")]
-        [SerializeField] private Vector2 worldSize = new Vector2(38f, 38f);
+        [Tooltip("战场尺寸（世界 XZ）。由工具按地面覆盖范围注入，保证小地图与可行走区域一致。\n" +
+                 "这里的初值只是「未注入时的兜底」：一键组装会把它写成实际的地面尺寸\n" +
+                 "（当前为 120×14 的桥梁），因此地形比例变化时小地图会自动跟上，不需要改代码。")]
+        [SerializeField] private Vector2 worldSize = new Vector2(120f, 14f);
 
         [Tooltip("映射区边缘留白（像素）：避免贴着边界的单位标记被压出边框。")]
         [Min(0f)]

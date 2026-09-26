@@ -1,6 +1,5 @@
 ﻿using System;
 using UnityEngine;
-using UnityEngine.AI;
 using MOBA.Components;
 using MOBA.Controllers;
 using MOBA.Core;
@@ -25,6 +24,12 @@ namespace MOBA.Units
     /// 「刚下达的移动命令被 AI 立刻改写」或「英雄自己跑回兵线」。
     /// 因此本项目的可移动单位分成两条互斥路线：AI 单位走 FSM（EntityAIController），
     /// 玩家英雄走玩家指令层（PlayerCommandController + 本类）。
+    ///
+    /// 【阶段八扩展：AI 英雄复用本类】10 个英雄共用同一个英雄预制体，因此 AI 英雄同样挂本类
+    /// （死亡收尾 / 复活链路完全一致）。两条路线的划分不再由"挂不挂本类"表达，而是由
+    /// <see cref="playerControlled"/> 表达：AI 英雄在实例上把 PlayerCommandController /
+    /// PlayerSkillController 禁用，并由 EntityAIController 驱动移动与平A。
+    /// 本类在死亡与复活两条路径上都用该开关守住输入控制器，绝不误开 AI 英雄的输入通道。
     /// </summary>
     [DisallowMultipleComponent]
     [RequireComponent(typeof(EntityBase))]
@@ -33,6 +38,15 @@ namespace MOBA.Units
         [Header("英雄身份")]
         [Tooltip("英雄显示名，供 UI / 结算界面展示。与 GameObject 名字分开：物体名要满足工具按名清理的约定，显示名要能改。")]
         [SerializeField] private string heroDisplayName = "英雄";
+
+        [Tooltip("是否为【玩家操控】的英雄（阶段八新增）。\n" +
+                 "true  = 死亡时掐断 PlayerCommandController、复活时恢复（阶段五以来的行为）。\n" +
+                 "false = AI 英雄：绝不触碰输入控制器。\n" +
+                 "【为什么必须有这个开关】AI 英雄与玩家英雄共用同一个英雄预制体，预制体上必然挂着\n" +
+                 "PlayerCommandController；工具在实例上把它禁用即可，但 Revive() 若无条件把它 enabled = true，\n" +
+                 "一个 AI 英雄复活后就会开始响应玩家的右键 —— 10 个英雄里会有 9 个跟着鼠标跑。\n" +
+                 "把'谁是被玩家操控的那一个'写成显式数据，比在复活路径上猜要可靠得多。")]
+        [SerializeField] private bool playerControlled = true;
 
         [Header("死亡处理")]
         [Tooltip("死亡后是否禁用 PlayerCommandController。\n" +
@@ -260,16 +274,22 @@ namespace MOBA.Units
             }
 
             // 3. 掐断玩家输入。指令层内部另有一道 IsDead 校验，这里是第一道闸门。
-            if (disablePlayerControlOnDeath && commandController != null)
+            //    AI 英雄（playerControlled == false）跳过：它的输入控制器本来就被工具禁用着，
+            //    这里去"禁用"它是无意义操作，而且一旦有人把它当成"AI 英雄也该关的东西"来理解，
+            //    就会掩盖"AI 英雄的输入通道是构造上就不存在"这一事实。
+            if (playerControlled && disablePlayerControlOnDeath && commandController != null)
             {
                 commandController.enabled = false;
             }
 
             // 4. 物理上锁死位移与索敌参与资格。
-            NavMeshAgent agent = entity.GetComponent<NavMeshAgent>();
-            if (agent != null)
+            //    【阶段八自审修正】代理的启停统一走 MovementComponent（它才是"唯一驱动 NavMeshAgent 的模块"），
+            //    不再在这里 GetComponent<NavMeshAgent>() 直接写 enabled —— 那是绕过封装的分叉实现。
+            //    注意 movement 允许为 null（异常配置的英雄没有移动组件），此时静默跳过：
+            //    没有代理也就没有"锁死代理"这回事。
+            if (movement != null)
             {
-                agent.enabled = false;
+                movement.SetAgentEnabled(false);
             }
 
             if (disableCollidersOnDeath)
@@ -281,13 +301,14 @@ namespace MOBA.Units
                 }
             }
 
-            // 5. 隐藏肉身（白盒期）。到此为止英雄在逻辑上已经是一具尸体（不可选中、不可被索敌、无法移动），
-            //    但胶囊体仍然立在那里 —— 战场上会堆满"站着的尸体"，看不出谁死谁活。
-            //    注意：必须在禁用碰撞体之后执行，这样"关掉外观"与"关掉物理参与"是同一批子节点，不会漏。
-            if (entity != null)
-            {
-                EntityVisuals.SetRenderersEnabled(entity.gameObject, false);
-            }
+            // 5.（阶段九：白盒隐身已删除）
+            //    这里原先调用 EntityVisuals.SetRenderersEnabled(gameObject, false) 把肉身直接隐藏。
+            //    那是"没有死亡动画"时期的权宜手段，代价是**尸体会在死亡瞬间凭空消失** ——
+            //    接入真实模型与 Die 动画后，死亡表现必须交给表现层（AnimationComponent 的 Die 触发），
+            //    由动画自己把单位放倒；逻辑层再抢着隐藏渲染器，只会让死亡动画一帧都播不出来。
+            //
+            //    与之对称的恢复调用（Revive 里的 SetRenderersEnabled(true)）也已一并删除 ——
+            //    同一件事不能留半个写入者，否则"谁在什么时候改渲染器"又要靠推理。
 
             // 6. 取消可选中。IsValidTarget 已用 Health.IsDead 兜住「死人不是合法目标」，
             //    这里显式再置一次是为了与 DeadState 的处理口径完全一致（避免日后有人只读 IsSelectable 做判断）。
@@ -299,7 +320,8 @@ namespace MOBA.Units
             if (logHeroEvents)
             {
                 Debug.Log(
-                    $"[HeroController] {heroDisplayName} 已阵亡，已停止寻路、退出索敌、隐藏肉身并关闭玩家输入。", this);
+                    $"[HeroController] {heroDisplayName} 已阵亡，已停止寻路、退出索敌并关闭玩家输入" +
+                    "（外观交给表现层的死亡动画，逻辑层不再隐藏渲染器）。", this);
             }
 
             // 8. 广播英雄死亡。放在收尾动作之后：订阅方（UI / 结算）读到的已经是最终状态。
@@ -309,19 +331,22 @@ namespace MOBA.Units
         /// <summary>
         /// 复活（阶段七新增）：把 <see cref="HandleDied"/> 做过的一切逆操作按对称顺序撤销，并把英雄搬回复活点。
         ///
-        /// 【为什么逆操作必须写在本类里】NavMeshAgent、Collider、PlayerCommandController 都是 HandleDied
+        /// 【为什么逆操作必须写在本类里】Collider 与 PlayerCommandController 都是 HandleDied
         /// 亲手禁用的。谁禁用、谁恢复，是唯一能让"死亡与复活"这两条路径保持可推理的方式；
         /// 让外部代码去解锁这些组件，迟早会出现"某处新增了一个禁用动作、但没有对应的恢复动作"的静默失效
         /// （典型症状：复活后英雄动不了，且 Console 一片安静）。
+        /// 唯一例外是 NavMeshAgent —— 它的启停与搬运统一由 MovementComponent 负责
+        /// （见 MovementComponent.SetAgentEnabled / WarpTo），本类只调用组件方法，不直接持有代理。
         ///
         /// 【调用者】由 MatchController 在复活倒计时结束时调用（配置与对局状态都在它手上），
         /// 本类只负责"执行"，不负责"计时"，也不读任何对局配置。
         ///
         /// 【为什么必须先启用代理再 Warp】NavMeshAgent 在禁用状态下 Warp 不生效——
         /// 顺序反了的症状是"复活了，但人还在原地躺着"，而且不报任何错。
+        /// 该顺序现已封装进 MovementComponent.WarpTo（阶段八自审修正），本类不再需要记得它。
         ///
         /// 【为什么 Warp 之后还要校验 isOnNavMesh】复活点若落在 NavMesh 之外（地图改动、出生点被挪），
-        /// 英雄会永久卡死且无法移动。这里主动 LogError 把静默失效变成一条可定位的日志。
+        /// 英雄会永久卡死且无法移动。该校验同样在 MovementComponent.WarpTo 内部完成（LogError）。
         /// </summary>
         /// <returns>确实执行了复活返回 true；英雄并未处于"已收尾的死亡状态"时返回 false（不做任何修改）。</returns>
         public bool Revive()
@@ -357,37 +382,24 @@ namespace MOBA.Units
                 mana.RestoreFull();
             }
 
-            // 4. 先启用代理，再搬运。顺序不可颠倒，理由见方法注释。
-            NavMeshAgent agent = entity.GetComponent<NavMeshAgent>();
+            // 4. 先启用代理，再搬运。顺序不可颠倒 —— 该顺序现在由 MovementComponent.WarpTo 内部保证，
+            //    调用方不可能弄反（阶段八自审修正：此前这段"先启用再 Warp + 失败降级"的逻辑写在本类里，
+            //    而 NavMeshAgent 的启停与搬运都属于 MovementComponent 的职责范围）。
             Vector3 respawnPosition = RespawnPosition;
 
-            if (agent != null)
+            if (movement != null)
             {
-                agent.enabled = true;
-
-                // Warp 返回 false 表示"搬运失败"（通常是目标点不在 NavMesh 上）。
-                // 失败时退化为直接写 Transform + nextPosition：至少让英雄出现在出生点，
-                // 同时把问题明确报出来，而不是让它在原地复活。
-                bool warped = agent.Warp(respawnPosition);
-                if (!warped)
+                if (!movement.WarpTo(respawnPosition))
                 {
-                    transform.position = respawnPosition;
-                    agent.nextPosition = respawnPosition;
-                    Debug.LogError(
-                        $"[HeroController] {heroDisplayName} 复活点 {respawnPosition} 无法通过 NavMeshAgent.Warp 到达" +
-                        "（通常意味着该点不在已烘焙的 NavMesh 上），已退化为直接设置坐标。" +
-                        "请检查复活点是否落在地面覆盖范围内、以及 NavMesh 是否已烘焙。", this);
-                }
-                else if (!agent.isOnNavMesh)
-                {
-                    Debug.LogError(
-                        $"[HeroController] {heroDisplayName} 复活后代理不在 NavMesh 上（复活点 {respawnPosition}），" +
-                        "英雄将无法寻路移动。请检查复活点与 NavMesh 烘焙结果。", this);
+                    // 失败原因由 WarpTo 内部以 LogError 报出（该点不在 NavMesh 上 / 代理缺失）。
+                    // 这里只补一句"是谁在复活"，让 Console 里的两条日志能对上人。
+                    Debug.LogWarning(
+                        $"[HeroController] {heroDisplayName} 的复活搬运未成功，已按降级路径处理（详见上一条错误日志）。", this);
                 }
             }
             else
             {
-                // 没有代理（异常配置）：至少把坐标摆正，行为与"无法寻路的英雄"一致。
+                // 没有移动组件（异常配置）：至少把坐标摆正，行为与"无法寻路的英雄"一致。
                 transform.position = respawnPosition;
             }
 
@@ -401,14 +413,17 @@ namespace MOBA.Units
                 }
             }
 
-            // 6. 恢复肉身外观：与 HandleDied 第 5 步严格对称，用同一批子节点。
-            //    漏掉这一步的症状是"英雄复活了、能走能打，但屏幕上看不见他"——最容易被当成相机问题去查。
-            EntityVisuals.SetRenderersEnabled(entity.gameObject, true);
+            // 6.（阶段九：外观恢复已删除）
+            //    这里原先调用 EntityVisuals.SetRenderersEnabled(gameObject, true) 与 HandleDied 的隐藏对称。
+            //    既然隐藏已删（见 HandleDied 第 5 步的说明），恢复也必须一并删除 ——
+            //    留一个"只恢复、不隐藏"的写入者，等于给渲染器留了一个没人知道何时触发的开关。
 
             // 7. 恢复可选中与玩家输入。
+            //    恢复输入同样只在"这是玩家英雄"时才做，理由与 HandleDied 第 3 步完全对称：
+            //    对 AI 英雄无条件 enabled = true，会让它复活后开始抢玩家的右键指令。
             entity.SetSelectable(true);
 
-            if (commandController != null)
+            if (playerControlled && commandController != null)
             {
                 commandController.enabled = true;
             }

@@ -42,6 +42,29 @@ namespace MOBA.Skills
                 return false;
             }
 
+            bool applied = ApplyPrimary(source, target, data);
+
+            // 附带效果（V1 上限一个，见 SkillData.SecondaryEffectType）。
+            // 刻意与主效果放在同一个入口里依次结算：调用点（Projectile / AreaEffectZone / SkillComponent）
+            // 只调一次 Apply，不需要知道"这个技能有几个效果"，因此日后把附带效果升级成数组时，
+            // 改动范围仍然只在本文件内。
+            if (data.HasSecondaryEffect && ApplySecondary(source, target, data))
+            {
+                applied = true;
+            }
+
+            return applied;
+        }
+
+        /// <summary>
+        /// 结算主效果（<see cref="SkillData.EffectType"/>）。
+        /// </summary>
+        /// <param name="source">施法者，允许为 null。</param>
+        /// <param name="target">效果承受方。</param>
+        /// <param name="data">技能配置。</param>
+        /// <returns>是否真的产生了效果。</returns>
+        private static bool ApplyPrimary(EntityBase source, ITargetable target, SkillData data)
+        {
             switch (data.EffectType)
             {
                 case SkillEffectType.Damage:
@@ -56,9 +79,73 @@ namespace MOBA.Skills
                 case SkillEffectType.Stun:
                     return ApplyStun(target, data.StunDuration);
 
+                case SkillEffectType.EmpowerNextAttack:
+                    return ApplyEmpowerNextAttack(
+                        target, data.EmpowerBonusDamage, data.SilenceDuration, data.EmpowerDuration);
+
+                case SkillEffectType.ExecuteDamage:
+                    return ApplyExecuteDamage(target, data.Damage, data.ExecuteHealthRatio, source);
+
+                case SkillEffectType.Heal:
+                    return ApplyHeal(target, data.HealAmount);
+
+                case SkillEffectType.Haste:
+                    return ApplyHaste(target, data.HastePercent, data.HasteDuration);
+
+                case SkillEffectType.None:
+                    // 显式空效果：不是错误（附带效果槽位为 None 时会走到这里），静默返回。
+                    return false;
+
                 default:
                     Debug.LogWarning(
                         $"[SkillEffectResolver] 未处理的效果类型 {data.EffectType}（技能 {data.name}），本次效果未结算。");
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// 结算附带效果。数值取自 <see cref="SkillData.SecondaryValue"/> / <see cref="SkillData.SecondaryDuration"/>，
+        /// 含义按类型解释（Haste → 加速比例与时长；Heal → 治疗量；Shield → 护盾值与时长……）。
+        /// </summary>
+        /// <param name="source">施法者，允许为 null。</param>
+        /// <param name="target">效果承受方。</param>
+        /// <param name="data">技能配置。</param>
+        /// <returns>是否真的产生了效果。</returns>
+        private static bool ApplySecondary(EntityBase source, ITargetable target, SkillData data)
+        {
+            float value = data.SecondaryValue;
+            float duration = data.SecondaryDuration;
+
+            switch (data.SecondaryEffectType)
+            {
+                case SkillEffectType.Haste:
+                    return ApplyHaste(target, value, duration);
+
+                case SkillEffectType.Heal:
+                    return ApplyHeal(target, value);
+
+                case SkillEffectType.Shield:
+                    return ApplyShield(target, value, duration);
+
+                case SkillEffectType.Slow:
+                    return ApplySlow(target, value, duration);
+
+                case SkillEffectType.Stun:
+                    return ApplyStun(target, duration);
+
+                case SkillEffectType.Damage:
+                    return ApplyDamage(target, value, source);
+
+                case SkillEffectType.ExecuteDamage:
+                    return ApplyExecuteDamage(target, value, data.ExecuteHealthRatio, source);
+
+                case SkillEffectType.EmpowerNextAttack:
+                    return ApplyEmpowerNextAttack(target, value, data.SilenceDuration, duration);
+
+                default:
+                    Debug.LogWarning(
+                        $"[SkillEffectResolver] 未处理的附带效果类型 {data.SecondaryEffectType}" +
+                        $"（技能 {data.name}），本次附带效果未结算。");
                     return false;
             }
         }
@@ -84,6 +171,149 @@ namespace MOBA.Skills
             }
 
             health.TakeDamage(damage, source);
+            return true;
+        }
+
+        /// <summary>
+        /// 结算斩杀伤害（阶段八新增）：伤害 = 基础值 + 系数 × 目标【已损失生命值】。
+        ///
+        /// 【为什么公式放在这里而不是让策划在资产里填"最终伤害"】斩杀的手感来源正是
+        /// "目标越残越疼"——这个非线性只能由公式表达。基础值与系数都在 SkillData 上，
+        /// 因此调整手感仍然是改资产，不需要改代码。
+        /// </summary>
+        /// <param name="target">承伤方。</param>
+        /// <param name="baseDamage">基础伤害，非正数时仍可能因斩杀加成而生效。</param>
+        /// <param name="lostHealthRatio">斩杀系数（0.35 = 目标已损失生命值的 35% 转化为额外伤害）。</param>
+        /// <param name="source">伤害来源，允许为 null。</param>
+        /// <returns>是否真的扣了血（或扣了盾）。</returns>
+        public static bool ApplyExecuteDamage(
+            ITargetable target, float baseDamage, float lostHealthRatio, EntityBase source)
+        {
+            HealthComponent health = ResolveHealth(target);
+            if (health == null || health.IsDead)
+            {
+                return false;
+            }
+
+            float lostHealth = Mathf.Max(0f, health.MaxHealth - health.CurrentHealth);
+            float damage = Mathf.Max(0f, baseDamage) + Mathf.Max(0f, lostHealthRatio) * lostHealth;
+
+            if (damage <= 0f)
+            {
+                return false;
+            }
+
+            health.TakeDamage(damage, source);
+            return true;
+        }
+
+        /// <summary>
+        /// 结算治疗（阶段八新增）：本方法是 HealthComponent.Heal 的第一个消费方。
+        /// 治疗量被 HealthComponent 内部夹到上限之内（血量不会超过最大值），
+        /// 且死亡目标不生效（死亡不可逆，见 HealthComponent.Heal 的闸门）。
+        /// </summary>
+        /// <param name="target">受疗方。</param>
+        /// <param name="amount">治疗量，非正数直接忽略。</param>
+        /// <returns>是否真的产生了治疗（目标满血时返回 false，与"没打中"在语义上一致）。</returns>
+        public static bool ApplyHeal(ITargetable target, float amount)
+        {
+            if (amount <= 0f)
+            {
+                return false;
+            }
+
+            HealthComponent health = ResolveHealth(target);
+            if (health == null || health.IsDead)
+            {
+                return false;
+            }
+
+            // 满血时 Heal 内部会直接返回（不广播事件），这里提前判一次，
+            // 让"是否真的产生了效果"这个返回值与"是否有数值变化"严格一致 ——
+            // 否则表现层会为一个零治疗量的技能播一次治疗特效。
+            if (health.CurrentHealth >= health.MaxHealth)
+            {
+                return false;
+            }
+
+            health.Heal(amount);
+            return true;
+        }
+
+        /// <summary>
+        /// 施加加速（阶段八新增）：移速的实际写入只经 MovementComponent.SetMoveSpeed。
+        /// </summary>
+        /// <param name="target">被加速方。</param>
+        /// <param name="percent">加速比例（0.3 = 移速 130%）。</param>
+        /// <param name="duration">持续时长（秒），非正数直接忽略。</param>
+        /// <returns>是否成功施加。</returns>
+        public static bool ApplyHaste(ITargetable target, float percent, float duration)
+        {
+            if (percent <= 0f || duration <= 0f)
+            {
+                return false;
+            }
+
+            BuffComponent buff = ResolveBuff(target);
+            if (buff == null)
+            {
+                LogMissingComponent(target, nameof(BuffComponent), "加速");
+                return false;
+            }
+
+            buff.ApplyHaste(percent, duration);
+            return true;
+        }
+
+        /// <summary>
+        /// 施加沉默（阶段八新增）：禁止施法，不影响移动与普攻。
+        /// 拦截点在 SkillComponent.TryCast 的自身状态校验链上，本方法只负责把状态挂上去。
+        /// </summary>
+        /// <param name="target">被沉默方。</param>
+        /// <param name="duration">持续时长（秒），非正数直接忽略。</param>
+        /// <returns>是否成功施加。</returns>
+        public static bool ApplySilence(ITargetable target, float duration)
+        {
+            if (duration <= 0f)
+            {
+                return false;
+            }
+
+            BuffComponent buff = ResolveBuff(target);
+            if (buff == null)
+            {
+                LogMissingComponent(target, nameof(BuffComponent), "沉默");
+                return false;
+            }
+
+            buff.ApplySilence(duration);
+            return true;
+        }
+
+        /// <summary>
+        /// 挂上「强化下一次普攻」（阶段八新增）：由 CombatComponent 在下一次普攻命中时取走。
+        /// </summary>
+        /// <param name="target">获得强化的单位（Self 施法时就是施法者自己）。</param>
+        /// <param name="bonusDamage">额外伤害，非正数直接忽略。</param>
+        /// <param name="silenceDuration">命中后对目标施加的沉默时长（秒）；0 = 不附带沉默。</param>
+        /// <param name="duration">兜底超时（秒），非正数直接忽略。</param>
+        /// <returns>是否成功施加。</returns>
+        public static bool ApplyEmpowerNextAttack(
+            ITargetable target, float bonusDamage, float silenceDuration, float duration)
+        {
+            if (bonusDamage <= 0f || duration <= 0f)
+            {
+                return false;
+            }
+
+            BuffComponent buff = ResolveBuff(target);
+            if (buff == null)
+            {
+                LogMissingComponent(target, nameof(BuffComponent), "强化普攻");
+                return false;
+            }
+
+            buff.ApplyEmpowerNextAttack(bonusDamage, silenceDuration, duration);
             return true;
         }
 

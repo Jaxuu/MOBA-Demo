@@ -459,7 +459,20 @@ namespace MOBA.Core
             {
                 // 与 CombatComponent.Initialize 同一约定：传 null 时保留 Inspector 上直挂的引用，
                 // 而不是把它清空——这样"配置资产里没填技能"的旧预制体仍可靠直挂方式工作。
-                Skills.Initialize(statsData.SkillQ, statsData.SkillW);
+                //
+                // 【阶段八：Q / W / E / R 四槽；阶段八修复：实例整体接管，模板只服务全新单位】
+                // AI 英雄的技能是【按实例】注入的（9 个 AI 英雄互不相同，共享的 EntityStatsData 无法表达），
+                // 由 AutoSceneBuilder 在实例化后直接写 SkillComponent；玩家英雄的四技能则来自
+                // 预制体直挂 + HeroStats（两者指向同一批资产）。
+                //
+                // 【这里曾经是一个静默失效点 —— 实机症状：9 个 AI 全在转盖伦的大风车】
+                // 10 个英雄共用同一份 HeroStats，而它配着盖伦的四件套；若 Initialize 按"非 null 就覆盖"
+                // 处理，运行期这一句就会把 AI 实例上的技能池抽签结果【全部改写成盖伦 QWER】——
+                // 编辑期注入是对的、场景里看 Inspector 也是对的，只在 Start 之后才被盖掉，
+                // 因此工具侧的任何读回校验都查不出来。现在 SkillComponent.Initialize 的语义是
+                // "实例整体接管（任意一槽非空即视为实例提供，模板一个槽都不写）"，这条覆盖链已经断掉
+                // （见该方法的说明）。
+                Skills.Initialize(statsData.SkillQ, statsData.SkillW, statsData.SkillE, statsData.SkillR);
             }
         }
 

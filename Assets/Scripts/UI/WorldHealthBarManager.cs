@@ -17,6 +17,14 @@ namespace MOBA.UI
     /// 单位预制体【零改动】，任何新单位自动获得血条，且禁用本管理器就等于"关掉全部血条"——
     /// 对局结果完全不变（表现层可整体关闭，铁律 4）。
     ///
+    /// 【阶段八实机修复：三层挂载保障】「某单位没有血条」曾经是个纯静默失效 —— 登记事件只广播一次，
+    /// 一旦那一次没挂上（池耗尽 / 相机未就绪 / 管理器的 OnEnable 与实体登记交错），该单位就永久没有血条。
+    /// 现在三道防线叠加，任何一道生效都能补齐：
+    ///   ① 事件订阅（实时路径，覆盖绝大多数情况）；
+    ///   ② 首帧末的全量 Snapshot 补挂（覆盖「订阅晚于登记」的窗口，且打汇总日志留痕）；
+    ///   ③ 可恢复原因的补挂队列 + 定时重试（覆盖池耗尽 / 相机未就绪）。
+    /// 三者都走同一个 TryBind 入口，因此去重与告警口径只有一份实现。
+    ///
     /// 【执行顺序】[DefaultExecutionOrder(100)] 保证本类的 LateUpdate 晚于 CameraController 的 LateUpdate：
     /// 相机在 LateUpdate 里才写最终位置，若血条先于它读相机，画面会慢一帧（平移时表现为血条轻微漂移）。
     ///
@@ -38,6 +46,25 @@ namespace MOBA.UI
         [Min(0)]
         [SerializeField] private int prewarmCount = 24;
 
+        [Header("补挂（阶段八实机修复）")]
+        // 【为什么必须有这一段 —— 这是实机"英雄没有血条"的根因之一】
+        // 血条池是【硬上限】：池空时 Get() 返回 null，而 HandleEntityRegistered 只在实体登记的那一刻被调用一次。
+        // 若那一次没拿到血条，该单位就【永远不会再有血条】—— 因为登记事件不会重发。
+        // 池里其它单位归还后空出来的位置，只会被"之后新登记的单位"用掉，先到先得的失败者被永久饿死。
+        // 实机日志证据：`[PrefabPool] HealthBarTemplate 的池已耗尽（容量 48）` 由 MinionSpawner.SpawnOne
+        // 的 Instantiate → EntityBase.OnEnable 路径打出 —— 说明当时确有单位被拒绝。
+        //
+        // 因此把"被拒绝"改成"排队等重试"：池腾出位置后按固定间隔补挂，直到成功或实体消失。
+        // 这与项目既有的「自愈路径必须无声也留痕」一致：补挂结果会打一条汇总日志，便于核对到底挂上了几条。
+        [Tooltip("补挂重试间隔（秒）。池是硬上限且被拒绝的单位不会收到第二次登记事件，\n" +
+                 "没有重试它就会永久没有血条。本值决定池腾出位置后多久补挂一次。")]
+        [Min(0.05f)]
+        [SerializeField] private float retryInterval = 0.5f;
+
+        [Tooltip("是否在首帧末做一次全量补挂。事件订阅已能覆盖绝大多数情况，\n" +
+                 "这一趟是为了兜住「管理器的 OnEnable 早于实体登记」与「实体在两次调用之间登记」两种窗口。")]
+        [SerializeField] private bool reconcileOnFirstFrame = true;
+
         [Header("相机与阵营")]
         [Tooltip("主相机。留空时自动取 Camera.main。")]
         [SerializeField] private Camera targetCamera;
@@ -52,6 +79,25 @@ namespace MOBA.UI
         /// <summary>实体 → 血条。用于在注销事件里 O(1) 找到对应的血条并归还。</summary>
         private readonly Dictionary<EntityBase, WorldHealthBarView> bars =
             new Dictionary<EntityBase, WorldHealthBarView>();
+
+        /// <summary>
+        /// 待补挂队列：登记时没能拿到血条、但【原因可恢复】的实体。
+        /// 只有"池耗尽"与"相机尚未就绪"两种原因会进队列 —— "没有 HealthComponent" 属于永久性原因，
+        /// 入队只会让每 0.5 秒做一次注定失败的尝试，并掩盖真正的问题（那条一次性告警已经说明了原因）。
+        /// </summary>
+        private readonly List<EntityBase> pendingBars = new List<EntityBase>();
+
+        /// <summary>下一次补挂的时刻（Time.time 基准）。</summary>
+        private float nextRetryTime;
+
+        /// <summary>是否已完成首帧末的全量补挂。</summary>
+        private bool hasReconciledOnce;
+
+        /// <summary>累计成功挂载过的血条数（含已回收的），仅用于汇总日志。</summary>
+        private int totalBoundCount;
+
+        /// <summary>累计被拒绝（进入补挂队列）的次数，仅用于汇总日志。</summary>
+        private int totalDeferredCount;
 
         /// <summary>对象池。Awake 里创建，之后只增删其中的实例。</summary>
         private PrefabPool<WorldHealthBarView> pool;
@@ -120,6 +166,7 @@ namespace MOBA.UI
             }
 
             bars.Clear();
+            pendingBars.Clear();
         }
 
         /// <summary>
@@ -131,6 +178,22 @@ namespace MOBA.UI
             if (pool == null)
             {
                 return;
+            }
+
+            // 首帧末的全量补挂：必须在所有场景对象的 OnEnable 都跑完之后做，
+            // 因此不能放在自己的 OnEnable 里（那时场景里可能还有实体尚未登记）。
+            // 每局只跑一次，代价是 1 次数组分配 + 一次全表遍历。
+            if (reconcileOnFirstFrame && !hasReconciledOnce)
+            {
+                hasReconciledOnce = true;
+                ReconcileSnapshot();
+            }
+
+            // 补挂队列：只有"池耗尽 / 相机未就绪"这两种可恢复的拒绝才会入队（见 pendingBars 的注释）。
+            if (pendingBars.Count > 0 && Time.time >= nextRetryTime)
+            {
+                nextRetryTime = Time.time + Mathf.Max(0.05f, retryInterval);
+                RetryPendingBars();
             }
 
             // 遍历池的活跃清单而不是 bars 字典：血条的位置更新只依赖"是否活跃"，
@@ -150,20 +213,99 @@ namespace MOBA.UI
         }
 
         /// <summary>
+        /// 全量补挂：遍历注册表快照，把"还没有血条"的实体补上，并打一条汇总日志。
+        ///
+        /// 为什么要有这一趟（事件订阅不是已经覆盖了吗）：
+        ///   · 管理器的 OnEnable 与实体的 OnEnable 之间没有确定的先后，两边的兜底（事件 + 快照）必须同时存在；
+        ///   · 补挂队列只覆盖"登记过但被拒绝"的实体，覆盖不了"登记事件压根没被收到"的窗口。
+        /// 汇总日志是刻意的：没有它时，"补挂逻辑跑了但无需补挂"与"补挂逻辑根本没跑"在 Console 上无法区分，
+        /// 而这正是排查"某单位没有血条"时最需要立刻知道的事。
+        /// </summary>
+        private void ReconcileSnapshot()
+        {
+            EntityBase[] snapshot = EntityRegistry.Snapshot();
+            int newlyBound = 0;
+
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                EntityBase entity = snapshot[i];
+
+                if (entity == null || bars.ContainsKey(entity))
+                {
+                    continue;
+                }
+
+                if (TryBind(entity))
+                {
+                    newlyBound++;
+                }
+            }
+
+            Debug.Log(
+                $"[WorldHealthBarManager] 血条就绪：当前显示 {bars.Count} 条（本次补挂 {newlyBound} 条），" +
+                $"待补挂 {pendingBars.Count} 个｜池占用 {pool.ActiveCount}/{pool.TotalCount}" +
+                $"（累计挂载 {totalBoundCount} 次，累计排队 {totalDeferredCount} 次）。" +
+                "若「待补挂」长期大于 0，说明池容量不足，请调大 prewarmCount。", this);
+        }
+
+        /// <summary>
+        /// 重试补挂队列。倒序遍历：成功项会被移出列表，倒序可保证索引不失效。
+        /// 已销毁的实体直接出队（Unity 重载的 == 运算符能识别已销毁对象）。
+        /// </summary>
+        private void RetryPendingBars()
+        {
+            for (int i = pendingBars.Count - 1; i >= 0; i--)
+            {
+                EntityBase entity = pendingBars[i];
+
+                if (entity == null || TryBind(entity))
+                {
+                    pendingBars.RemoveAt(i);
+                }
+            }
+        }
+
+        /// <summary>把一个实体加入补挂队列（已入队则忽略，避免队列无限增长）。</summary>
+        private void EnqueuePendingBar(EntityBase entity)
+        {
+            if (entity == null || pendingBars.Contains(entity))
+            {
+                return;
+            }
+
+            pendingBars.Add(entity);
+            totalDeferredCount++;
+        }
+
+        /// <summary>
         /// 实体登记回调：为它取一条血条并绑定。
         /// 去重是必要的——本方法既被事件调用、也被 OnEnable 的快照补挂调用。
         /// </summary>
         /// <param name="entity">刚登记的实体。</param>
         private void HandleEntityRegistered(EntityBase entity)
         {
+            TryBind(entity);
+        }
+
+        /// <summary>
+        /// 尝试为实体挂一条血条。三条失败路径的处理方式刻意不同：
+        ///   · 没有 HealthComponent —— 永久性原因，只告警一次、不入队（入队只会做注定失败的轮询）；
+        ///   · 没有相机 / 池耗尽 —— 可恢复原因，进入补挂队列，等条件满足后重试；
+        /// 这正是"登记事件只发一次、被拒绝的单位会永久没有血条"这一静默失效的解药。
+        /// </summary>
+        /// <param name="entity">目标实体。</param>
+        /// <returns>本次确实挂上了血条（或它本来就有）返回 true。</returns>
+        private bool TryBind(EntityBase entity)
+        {
             if (entity == null || pool == null)
             {
-                return;
+                return false;
             }
 
+            // 去重是必要的：本方法既被事件调用、也被快照补挂与重试队列调用。
             if (bars.ContainsKey(entity))
             {
-                return;
+                return true;
             }
 
             // 没有生命组件的实体不需要血条（例如纯装饰对象）。这不是错误，但要留一条线索：
@@ -177,7 +319,7 @@ namespace MOBA.UI
                         $"[WorldHealthBarManager] {entity.name} 上没有 HealthComponent，不会为它显示血条。", entity);
                 }
 
-                return;
+                return false;
             }
 
             if (targetCamera == null)
@@ -193,26 +335,39 @@ namespace MOBA.UI
                 }
             }
 
+            if (targetCamera == null)
+            {
+                // 相机还没就绪（场景加载中途）：入队等重试，而不是永久放弃这个单位。
+                EnqueuePendingBar(entity);
+                return false;
+            }
+
             WorldHealthBarView bar = pool.Get();
 
-            // 池耗尽 → 本次不显示。表现缺失不影响逻辑（池内部已告警一次）。
+            // 池耗尽 → 本次不显示，入队等池腾出位置后补挂（池内部已告警一次）。
             if (bar == null)
             {
-                return;
+                EnqueuePendingBar(entity);
+                return false;
             }
 
             if (!bar.Bind(entity, targetCamera, localTeam))
             {
+                // Bind 只在"实体没有 HealthComponent"时失败，而上面已经拦过，这里属于竞态兜底。
                 pool.Release(bar);
-                return;
+                EnqueuePendingBar(entity);
+                return false;
             }
 
             bars[entity] = bar;
+            totalBoundCount++;
 
             if (logLifecycle)
             {
                 Debug.Log($"[WorldHealthBarManager] 已为 {entity.name} 挂载血条（当前 {bars.Count} 条）。", this);
             }
+
+            return true;
         }
 
         /// <summary>
@@ -226,6 +381,10 @@ namespace MOBA.UI
             {
                 return;
             }
+
+            // 先把可能存在的补挂申请撤掉：实体已经退出对局，再补挂它没有意义，
+            // 而且留着会让"待补挂"这个数字永远不归零，掩盖真正的容量不足。
+            pendingBars.Remove(entity);
 
             WorldHealthBarView bar;
             if (!bars.TryGetValue(entity, out bar))

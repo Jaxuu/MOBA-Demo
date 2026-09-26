@@ -25,5 +25,36 @@
 
         /// <summary>眩晕：走 BuffComponent.ApplyStun（移动锁 + 攻击锁，到期自动解锁）。</summary>
         Stun = 3,
+
+        /// <summary>
+        /// 强化下一次普攻（阶段八新增）：给【自身】挂一层一次性状态，
+        /// 下一次普攻结算时附加额外伤害，并在命中后对目标施加沉默；命中即消耗。
+        ///
+        /// 【为什么它是一个"效果"而不是一个 Buff 类型】它的生命周期终点不是"到期"，
+        /// 而是"下一次普攻命中"——由 CombatComponent 在结算伤害时主动取走（TryConsume）。
+        /// Buff 容器只负责保管与超时兜底（防止攒着不放）。
+        /// </summary>
+        EmpowerNextAttack = 4,
+
+        /// <summary>
+        /// 斩杀伤害（阶段八新增）：伤害 = 基础值 + 系数 × 目标【已损失生命值】。
+        /// 满血目标只吃基础值，残血目标吃满加成 —— 这正是"斩杀"的手感来源。
+        /// </summary>
+        ExecuteDamage = 5,
+
+        /// <summary>治疗：走 HealthComponent.Heal（血量不会超过上限，死亡目标不生效）。</summary>
+        Heal = 6,
+
+        /// <summary>加速：走 BuffComponent.ApplyHaste（只经 MovementComponent.SetMoveSpeed 改移速）。</summary>
+        Haste = 7,
+
+        /// <summary>
+        /// 空效果：仅用于 SkillData 的【附带效果】槽位表示"没有附带效果"。
+        ///
+        /// 【为什么值必须追加在末尾（= 8）而不是放到开头当 0】枚举值会被工具按 intValue 落盘进技能资产。
+        /// 把 None 插到 0 会让所有旧资产里的 Damage（0）被重新解释成"空效果"——技能照放、伤害为零、
+        /// 且不报任何错，是最难排查的一类回归。因此新成员一律追加在末尾。
+        /// </summary>
+        None = 8,
     }
 }

@@ -22,6 +22,9 @@ GameObject:
   - component: {fileID: 3359753580412422499}
   - component: {fileID: 8374300092937071247}
   - component: {fileID: 5244274147053700043}
+  - component: {fileID: 2491008413190082439}
+  - component: {fileID: 1271723993798119485}
+  - component: {fileID: 83796399646917230}
   m_Layer: 0
   m_HasEditorInfo: 1
   m_Name: HeroPrefab
@@ -148,6 +151,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   drawPathGizmos: 1
+  arrivalStoppingDistance: 0.5
+  avoidancePriority: 50
   movementLocked: 0
 --- !u!114 &5917276290060360068
 MonoBehaviour:
@@ -186,6 +191,16 @@ MonoBehaviour:
   stunEndTime: 0
   shieldActive: 0
   shieldEndTime: 0
+  hasted: 0
+  hastePercent: 0
+  hasteEndTime: 0
+  silenced: 0
+  silenceEndTime: 0
+  empowerActive: 0
+  empowerBonusDamage: 0
+  empowerSilenceDuration: 0
+  empowerEndTime: 0
+  hasSpeedSnapshot: 0
   baseSpeed: 0
 --- !u!114 &1399721446264363885
 MonoBehaviour:
@@ -199,10 +214,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 65e9a2db456d28145ade4fa5ba58e8dc, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  skillQ: {fileID: 11400000, guid: fe3adf32fb99e3946ba78f5664ed2206, type: 2}
-  skillW: {fileID: 11400000, guid: 14e4c142f715b5242b406b154c019775, type: 2}
-  skillE: {fileID: 0}
-  skillR: {fileID: 0}
+  skillSlots:
+  - {fileID: 11400000, guid: fe3adf32fb99e3946ba78f5664ed2206, type: 2}
+  - {fileID: 11400000, guid: 14e4c142f715b5242b406b154c019775, type: 2}
+  - {fileID: 11400000, guid: d90aeb31e4eef7e4bbe2f7b2f9b17d3c, type: 2}
+  - {fileID: 11400000, guid: 32fb1959c4b3cc34f8a34a09cf09976d, type: 2}
   logCastEvents: 1
 --- !u!114 &5306362140962538019
 MonoBehaviour:
@@ -233,6 +249,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   heroDisplayName: "\u82F1\u96C4"
+  playerControlled: 1
   disablePlayerControlOnDeath: 1
   disableCollidersOnDeath: 1
   respawnPoint: {fileID: 0}
@@ -285,6 +302,71 @@ MonoBehaviour:
   groundPlaneY: 0
   logCastCommands: 1
   drawDebugRay: 0
+--- !u!114 &2491008413190082439
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a90b0c892a8276e488e414d380ec8a8b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  allyHeroMaterial: {fileID: 2100000, guid: 934d1ead49e5e7547bed476c866ea487, type: 2}
+  enemyHeroMaterial: {fileID: 2100000, guid: 95f32b582e39e0546b50e2a1239036ed, type: 2}
+  allyMinionMaterial: {fileID: 2100000, guid: 578c440ff032766408a5f81ea3ef7058, type: 2}
+  enemyMinionMaterial: {fileID: 2100000, guid: 7fb721057605f49468c4be6f0bbc4cc8, type: 2}
+  includeChildren: 1
+  applyOnStart: 1
+  logApply: 0
+--- !u!95 &1271723993798119485
+Animator:
+  serializedVersion: 6
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_Avatar: {fileID: 0}
+  m_Controller: {fileID: 9100000, guid: e9cf0a2361c695c4ea1b4c484f105e8e, type: 2}
+  m_CullingMode: 0
+  m_UpdateMode: 0
+  m_UpdateFrequencyMode: 0
+  m_UpdateFrequency: 0
+  m_ApplyRootMotion: 0
+  m_LinearVelocityBlending: 0
+  m_StabilizeFeet: 0
+  m_WarningMessage: 
+  m_HasTransformHierarchy: 1
+  m_AllowConstantClipSamplingOptimization: 1
+  m_KeepAnimatorStateOnDisable: 0
+  m_WriteDefaultValuesOnDisable: 0
+--- !u!114 &83796399646917230
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7008272173687720185}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3873fd50dda1fcd46846290f68a46b39, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  animator: {fileID: 1271723993798119485}
+  modelPrefab: {fileID: 5601613021238251170, guid: e0ac03c4637892b46a3c7bd7acc5239b, type: 3}
+  enableAnimation: 1
+  speedParameterName: Speed
+  attackTriggerName: Attack
+  spellTriggerName: Spell
+  dieTriggerName: Die
+  speedDampTime: 0.1
+  speedDeadZone: 0.05
+  speedReference: 0
+  logAnimationEvents: 0
 --- !u!1 &7347408681005187016
 GameObject:
   m_ObjectHideFlags: 0

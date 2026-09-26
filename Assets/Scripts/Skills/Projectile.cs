@@ -22,6 +22,11 @@ namespace MOBA.Skills
     ///   ② 超出最大飞行距离；
     ///   ③ 超出最大存活时间；
     ///   ④ 目标中途被销毁（判空后飞至最后已知位置再回收，不结算伤害）。
+    ///
+    /// 【阶段八扩展：普攻弹道】防御塔的普攻改为发射弹道（README 2.1.3），因此本类新增
+    /// <see cref="InitializeAttack"/> 这条初始化路径。两条路径共用全部飞行 / 命中 / 回收逻辑，
+    /// 唯一分叉在"命中时结算什么"：技能走 SkillEffectResolver.Apply（按效果类型分派），
+    /// 普攻走 SkillEffectResolver.ApplyDamage（固定伤害）。伤害管线仍然只有一份。
     /// </summary>
     [DisallowMultipleComponent]
     public class Projectile : MonoBehaviour
@@ -36,8 +41,42 @@ namespace MOBA.Skills
         /// <summary>飞行目标（可能中途死亡 / 被销毁，因此每次访问都要做存活检查）。</summary>
         private ITargetable target;
 
-        /// <summary>技能配置（飞行速度、命中半径、伤害等参数的唯一来源）。</summary>
+        /// <summary>技能配置（飞行速度、命中半径、伤害等参数的唯一来源）。普攻弹道为 null。</summary>
         private SkillData data;
+
+        /// <summary>
+        /// 本发弹道是不是「普攻弹道」（阶段八新增，由防御塔等固定建筑发射）。
+        ///
+        /// 【为什么要区分】技能弹道的载荷是一份 SkillData（走 SkillEffectResolver.Apply 按效果类型分派）；
+        /// 普攻弹道的载荷是一个固定伤害数值（数值来源是 AttackData，与技能配置无关）。
+        /// 两者共用同一套飞行 / 命中 / 回收逻辑，只在"命中时结算什么"这一步分叉——
+        /// 这样塔的弹道不会因为"没有 SkillData"而需要一个平行的实现。
+        /// </summary>
+        private bool isAttackProjectile;
+
+        /// <summary>普攻弹道的伤害值（isAttackProjectile 为 true 时有效）。</summary>
+        private float attackDamage;
+
+        // ---- 飞行参数（阶段八从 data 里提出来存成字段） ----
+        // 提取的理由：技能弹道与普攻弹道的参数来源不同（SkillData / 调用方实参），
+        // 而飞行与命中判定必须完全共用。存成字段后 Update 不再直接读 data，
+        // 两条路径的行为就天然一致。
+
+        /// <summary>飞行速度（米/秒）。</summary>
+        private float flightSpeed = 1f;
+
+        /// <summary>命中半径（米）。</summary>
+        private float hitRadius = 0.5f;
+
+        /// <summary>最大飞行距离（米），兜住"目标不可达时弹道永生"。</summary>
+        private float maxTravelDistance = 20f;
+
+        /// <summary>
+        /// 是否已获得有效飞行参数。
+        /// 为 false 时 Update 直接回收：这对应"生成流程被绕过、Initialize 从未被调用"的情形，
+        /// 保留这一道闸门可以避免弹道静止在空中永不结算（Console 里没有任何线索）。
+        /// </summary>
+        private bool hasFlightConfig;
 
         /// <summary>
         /// 目标最后一次已知的位置。
@@ -76,6 +115,9 @@ namespace MOBA.Skills
         /// <summary>当前飞行目标（只读，可能已失效）。</summary>
         public ITargetable Target => target;
 
+        /// <summary>本发弹道是否为普攻弹道（只读），供调试与测试断言使用。</summary>
+        public bool IsAttackProjectile => isAttackProjectile;
+
         /// <summary>
         /// 初始化弹道。由 ProjectileSpawner 在生成后立即调用（先 AddComponent 再 Initialize，
         /// 与项目「动态创建的单位必须先挂齐组件再注入」的约定一致）。
@@ -88,6 +130,78 @@ namespace MOBA.Skills
             source = newSource;
             target = newTarget;
             data = newData;
+            isAttackProjectile = false;
+            attackDamage = 0f;
+
+            if (newData == null)
+            {
+                // 没有配置就没有飞行参数（生成流程被绕过）。标记为不可飞行，Update 会立刻回收，
+                // 比每帧抛异常或静止在空中更容易定位。
+                launchPosition = transform.position;
+                launchTime = Time.time;
+                lastKnownTargetPosition = launchPosition;
+                hasFlightConfig = false;
+                return;
+            }
+
+            // 最大存活时间 = 理论最长飞行时间 × 3 倍余量。
+            // 为什么除了最大飞行距离还需要它：距离判定兜住"飞得太远"，但目标静止不动且因浮点误差
+            // 始终判定不到命中时，距离也不会继续增长——两道保险缺一不可。
+            float travelBudget = newData.CastRange + newData.MaxTravelDistance;
+
+            BeginFlight(
+                Mathf.Max(0.01f, newData.ProjectileSpeed),
+                Mathf.Max(0.01f, newData.ProjectileRadius),
+                Mathf.Max(0.01f, newData.MaxTravelDistance),
+                travelBudget);
+        }
+
+        /// <summary>
+        /// 初始化一发「普攻弹道」（阶段八新增）：由防御塔等固定建筑发射，载荷是一份固定伤害。
+        ///
+        /// 【为什么复用 Projectile 而不是另写一个 AttackProjectile 类】
+        /// 飞行、追踪、四种终止条件、命中判定与回收是一整套必须完全一致的逻辑；
+        /// 另写一份意味着"技能弹道修了穿透 bug、普攻弹道没修"这类分叉迟早出现。
+        /// 差异只有一处——命中时结算什么（技能走 SkillEffectResolver.Apply，普攻走 ApplyDamage），
+        /// 因此用 isAttackProjectile 一个开关分叉即可。
+        ///
+        /// 伤害最终仍落到 SkillEffectResolver.ApplyDamage（与技能伤害同一条管线），
+        /// 护盾吸收与死亡判定不会出现第二份实现。
+        /// </summary>
+        /// <param name="newSource">发射者（塔），用于伤害归属与日志。</param>
+        /// <param name="newTarget">飞行目标。</param>
+        /// <param name="damage">命中时结算的伤害值。</param>
+        /// <param name="speed">飞行速度（米/秒）。</param>
+        /// <param name="radius">命中半径（米）。</param>
+        /// <param name="maxTravel">最大飞行距离（米）。</param>
+        public void InitializeAttack(
+            EntityBase newSource, ITargetable newTarget, float damage, float speed, float radius, float maxTravel)
+        {
+            source = newSource;
+            target = newTarget;
+            data = null;
+            isAttackProjectile = true;
+            attackDamage = Mathf.Max(0f, damage);
+
+            float resolvedTravel = Mathf.Max(0.01f, maxTravel);
+            BeginFlight(Mathf.Max(0.01f, speed), Mathf.Max(0.01f, radius), resolvedTravel, resolvedTravel);
+        }
+
+        /// <summary>
+        /// 记录飞行参数并锚定起点。
+        /// 技能弹道与普攻弹道共用的唯一入口——把"起飞"这件事收敛到一处，
+        /// 两条路径的追踪点、寿命上限、起点记录就不会出现口径差异。
+        /// </summary>
+        /// <param name="speed">飞行速度（米/秒）。</param>
+        /// <param name="radius">命中半径（米）。</param>
+        /// <param name="travel">最大飞行距离（米）。</param>
+        /// <param name="travelBudget">寿命估算用的飞行预算（米）。</param>
+        private void BeginFlight(float speed, float radius, float travel, float travelBudget)
+        {
+            flightSpeed = speed;
+            hitRadius = radius;
+            maxTravelDistance = travel;
+            hasFlightConfig = true;
 
             launchPosition = transform.position;
             launchTime = Time.time;
@@ -98,11 +212,6 @@ namespace MOBA.Skills
                 ? new Vector3(position.x, launchPosition.y, position.z)
                 : launchPosition;
 
-            // 最大存活时间 = 理论最长飞行时间 × 3 倍余量。
-            // 为什么除了最大飞行距离还需要它：距离判定兜住"飞得太远"，但目标静止不动且因浮点误差
-            // 始终判定不到命中时，距离也不会继续增长——两道保险缺一不可。
-            float speed = newData != null ? Mathf.Max(0.01f, newData.ProjectileSpeed) : 1f;
-            float travelBudget = newData != null ? newData.CastRange + newData.MaxTravelDistance : 20f;
             maxLifetime = Mathf.Max(1f, travelBudget / speed * 3f);
         }
 
@@ -113,10 +222,9 @@ namespace MOBA.Skills
                 return;
             }
 
-            if (data == null)
+            if (!hasFlightConfig)
             {
-                // 没有配置就没有飞行参数。正常情况下 Initialize 一定会被调用，
-                // 走到这里说明生成流程被绕过，直接回收比每帧抛异常好。
+                // 没有飞行参数（Initialize 未被调用或收到的配置为 null），直接回收比每帧抛异常好。
                 Recycle();
                 return;
             }
@@ -130,15 +238,14 @@ namespace MOBA.Skills
             Vector3 aimPoint = ResolveAimPoint();
             Vector3 currentPosition = transform.position;
 
-            float speed = Mathf.Max(0.01f, data.ProjectileSpeed);
-            float step = speed * deltaTime;
+            float step = flightSpeed * deltaTime;
             float distance = Vector3.Distance(currentPosition, aimPoint);
 
             // 命中判定：满足任一条件即判定命中。
             //  · distance <= 命中半径：常规命中；
             //  · distance <= step：本帧的位移足以越过判定点，若不提前判定，高速弹道会直接穿过去
             //    （tunnelling），表现为"明明瞄准了却打不到"。
-            if (distance <= data.ProjectileRadius || distance <= step)
+            if (distance <= hitRadius || distance <= step)
             {
                 transform.position = aimPoint;
                 HandleHit(aimPoint);
@@ -155,7 +262,7 @@ namespace MOBA.Skills
             }
 
             // 条件②：超出最大飞行距离。
-            if ((transform.position - launchPosition).sqrMagnitude >= data.MaxTravelDistance * data.MaxTravelDistance)
+            if ((transform.position - launchPosition).sqrMagnitude >= maxTravelDistance * maxTravelDistance)
             {
                 Recycle();
                 return;
@@ -180,19 +287,31 @@ namespace MOBA.Skills
             Vector3 liveTargetPosition;
             ITargetable liveTarget = TryResolveTargetPosition(out liveTargetPosition) ? target : null;
 
-            if (liveTarget != null && SkillEffectResolver.Apply(source, liveTarget, data))
+            bool applied = false;
+
+            if (liveTarget != null)
+            {
+                // 唯一的分叉点：技能弹道按 SkillData 的效果类型分派，普攻弹道结算一份固定伤害。
+                applied = isAttackProjectile
+                    ? SkillEffectResolver.ApplyDamage(liveTarget, attackDamage, source)
+                    : SkillEffectResolver.Apply(source, liveTarget, data);
+            }
+
+            if (applied)
             {
                 if (logHitEvents)
                 {
-                    Debug.Log(
-                        $"[Projectile] {name} 命中 {DescribeTarget(liveTarget)}，结算 {data.EffectType} " +
-                        $"（伤害 {data.Damage:F1}）", this);
+                    string payload = isAttackProjectile
+                        ? $"普攻 {attackDamage:F1} 点伤害"
+                        : $"{data.EffectType}（伤害 {data.Damage:F1}）";
+
+                    Debug.Log($"[Projectile] {name} 命中 {DescribeTarget(liveTarget)}，结算 {payload}", this);
                 }
 
                 OnHit?.Invoke(this, liveTarget, hitPosition);
             }
 
-            if (data.MaxHitCount > 1 && !hasWarnedPiercing)
+            if (!isAttackProjectile && data != null && data.MaxHitCount > 1 && !hasWarnedPiercing)
             {
                 hasWarnedPiercing = true;
                 Debug.LogWarning(

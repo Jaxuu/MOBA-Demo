@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿using System.Collections.Generic;
+using UnityEngine;
 using MOBA.Core;
 
 namespace MOBA.Components
@@ -11,7 +12,8 @@ namespace MOBA.Components
     /// 2. 不发起攻击（那是 CombatComponent 的事），不驱动移动（那是 FSM 与 MovementComponent 的事）；
     /// 3. 只依赖 ITargetable 接口，因此不关心目标是英雄、小兵还是防御塔。
     ///
-    /// 性能约定（计划书 6.4）：FindNearestEnemy 内部会做一次物理范围查询，
+    /// 性能约定（计划书 6.4）：FindNearestEnemy / CollectEnemiesInRange 内部会做一次物理范围查询
+    /// （阶段八起为 Physics.OverlapSphereNonAlloc + 预分配缓冲，稳态零 GC 分配），
     /// 必须按固定周期调用（例如 AI 的检测间隔），**不要放进每帧的 Update 里无条件调用**。
     /// </summary>
     [DisallowMultipleComponent]
@@ -56,6 +58,23 @@ namespace MOBA.Components
 
         /// <summary>是否已就"缺少 EntityBase"报过错误，防止每次索敌都刷日志。</summary>
         private bool hasReportedMissingOwner;
+
+        /// <summary>
+        /// 物理范围查询的复用缓冲（阶段八性能前置项）。
+        ///
+        /// 【为什么必须换成 NonAlloc】原实现用 Physics.OverlapSphere（每次调用分配一个新数组）。
+        /// 阶段八战场从「1 英雄 + 一条兵线」变成「10 英雄 + 双兵线 + 6 塔」，同屏单位密度约 ×3，
+        /// 每个单位每 0.25 秒一次分配会直接把「稳态 GC ≤ 1KB/帧」的验收目标顶掉。
+        /// NonAlloc 版本把结果写进这个预分配数组，稳态零分配。
+        ///
+        /// 【容量为什么从 64 提到 128】阶段八第三步把索敌半径放大了 2~3 倍
+        /// （小兵 10 → 24 米、英雄 8 → 20 米）。半径翻倍意味着球体积翻 4 倍，候选数量级同步上升；
+        /// 而每个单位通常带 1~2 个碰撞体（根节点 + 模型子节点），64 个槽位在团战时会被顶满。
+        /// 顶满的后果不是崩溃，而是**结果被截断**（少几个候选）——最近目标恰好被截掉时，
+        /// 本次索敌会换一个目标、下一周期自然修正，因此只是"表现抖动"级别的降级。
+        /// 用 128 个槽位（约 1KB 引用，只在初始化时分配一次）换掉这种抖动是划算的。
+        /// </summary>
+        private readonly Collider[] overlapBuffer = new Collider[128];
 
         /// <summary>
         /// 当前锁定的目标。null 表示没有目标。
@@ -221,64 +240,32 @@ namespace MOBA.Components
         /// <summary>
         /// 在索敌半径内搜索最近的合法敌方目标。
         /// 筛选条件：实现了 ITargetable、阵营不同、IsValidTarget 为 true、Transform 有效。
+        ///
+        /// 阶段八起改为 Physics.OverlapSphereNonAlloc（复用 overlapBuffer），稳态零 GC 分配，
+        /// 外部契约（返回最近合法敌人 / 找不到返回 null）一字未改。
         /// </summary>
         /// <returns>最近的合法敌人；找不到返回 null（调用方需判空）。</returns>
         public ITargetable FindNearestEnemy()
         {
-            if (Owner == null)
-            {
-                if (!hasReportedMissingOwner)
-                {
-                    hasReportedMissingOwner = true;
-                    Debug.LogError(
-                        $"[TargetingComponent] {name} 上找不到 EntityBase，无法判断阵营，索敌功能不可用。" +
-                        "请确保 EntityBase 与 TargetingComponent 挂在同一个 GameObject 上。", this);
-                }
-                return null;
-            }
-
-            if (detectionRadius <= 0f)
+            if (!CanQuery())
             {
                 return null;
             }
 
             Vector3 origin = transform.position;
-
-            // 注意：OverlapSphere 每次调用都会分配一个新数组（GC Alloc）。
-            // 因此本方法只应在固定检测周期里调用；若后续单位数量上升导致 GC 压力明显，
-            // 可替换为 Physics.OverlapSphereNonAlloc + 预分配缓冲，接口签名无需改变。
-            Collider[] candidates = Physics.OverlapSphere(origin, detectionRadius, targetLayers, QueryTriggerInteraction.Ignore);
+            int count = QueryOverlap(origin);
 
             ITargetable nearest = null;
             float nearestSqrDistance = float.MaxValue;
 
-            for (int i = 0; i < candidates.Length; i++)
+            for (int i = 0; i < count; i++)
             {
-                Collider candidateCollider = candidates[i];
-                if (candidateCollider == null)
-                {
-                    continue;
-                }
-
-                // 用 GetComponentInParent 而不是 GetComponent：碰撞体通常挂在模型子节点上，
-                // 而 EntityBase / ITargetable 实现位于根节点，向上查找才能稳定命中。
-                ITargetable candidate = candidateCollider.GetComponentInParent<ITargetable>();
-                if (candidate == null)
-                {
-                    continue;
-                }
-
-                // 过滤自身、友方、已死亡/不可选中目标。
-                if (!IsEnemy(candidate) || !candidate.IsValidTarget)
+                if (!TryResolveCandidate(overlapBuffer[i], out ITargetable candidate))
                 {
                     continue;
                 }
 
                 Transform candidateTransform = candidate.TargetTransform;
-                if (candidateTransform == null)
-                {
-                    continue;
-                }
 
                 // 比较平方距离而不是 Distance：省掉每次循环的开方运算。
                 float sqrDistance = (candidateTransform.position - origin).sqrMagnitude;
@@ -290,6 +277,208 @@ namespace MOBA.Components
             }
 
             return nearest;
+        }
+
+        /// <summary>
+        /// 把索敌半径内的全部合法敌方目标收集到调用方提供的缓冲区（阶段八新增）。
+        ///
+        /// 【为什么需要它】防御塔的仇恨优先级（小兵 &gt; 英雄 &gt; 其它，同级取最近）需要
+        /// 在【一次】物理查询的结果上按单位类型分档比较；若退化成「按类型各查一次」，
+        /// 6 座塔每 0.25 秒就会多做一倍的 OverlapSphere。
+        ///
+        /// 【契约】本方法【只追加、不清空】缓冲区，由调用方决定何时清空——
+        /// 这样调用方可以复用同一个 List 实例，跨帧零分配。
+        /// 同一单位的多个碰撞体已在本方法内去重。
+        /// </summary>
+        /// <param name="buffer">收集目标用的缓冲区，允许为 null（此时返回 0）。</param>
+        /// <returns>本次收集到的合法敌方目标数量。</returns>
+        public int CollectEnemiesInRange(List<ITargetable> buffer)
+        {
+            if (buffer == null || !CanQuery())
+            {
+                return 0;
+            }
+
+            Vector3 origin = transform.position;
+            int count = QueryOverlap(origin);
+            int collected = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                if (!TryResolveCandidate(overlapBuffer[i], out ITargetable candidate))
+                {
+                    continue;
+                }
+
+                // 去重：一个单位常挂着多个碰撞体（模型子节点 + 根节点），
+                // 不去重会让它在优先级筛选里占多个候选位，也会让"最近者"的比较做无用功。
+                // 用 List.Contains 而不是哈希表：单次候选只有个位数，线性扫描比维护集合更省。
+                if (buffer.Contains(candidate))
+                {
+                    continue;
+                }
+
+                buffer.Add(candidate);
+                collected++;
+            }
+
+            return collected;
+        }
+
+        /// <summary>
+        /// 在索敌半径内寻找【血量百分比最低】的友方单位（阶段八新增，服务治疗类技能）。
+        ///
+        /// 【为什么它与 FindNearestEnemy 是两个方法而不是一个带开关的方法】
+        /// 两者的筛选口径与排序键都不同：这里只认友方（且排除中立），排序键是血量而非距离。
+        /// 合成一个方法会让调用方必须传一堆开关，且"敌方"与"友方"两条路径迟早互相污染
+        /// （最典型的是中立单位被当成友方）。
+        ///
+        /// 【为什么含施法者自己】施法者与自己同阵营，把它排除掉会让"残血的治疗者无法自救"，
+        /// 而那恰恰是 AI 最需要治疗的时候。是否允许自疗由技能的目标校验决定（TargetsAlly 放行同阵营）。
+        ///
+        /// 【为什么排序键是血量百分比而不是绝对血量】小兵与英雄的血量量级差 5 倍，
+        /// 用绝对值会永远优先去治疗"血最多的那个英雄"，而濒死的小兵被无视。
+        /// </summary>
+        /// <param name="maxHealthPercent">只考虑血量百分比低于该阈值的友方（1 = 不考虑阈值）。</param>
+        /// <returns>符合条件的友方单位；没有则返回 null（调用方需判空）。</returns>
+        public ITargetable FindLowestHealthAllyInRange(float maxHealthPercent)
+        {
+            if (!CanQuery())
+            {
+                return null;
+            }
+
+            Vector3 origin = transform.position;
+            int count = QueryOverlap(origin);
+
+            ITargetable best = null;
+            float bestHealthPercent = float.MaxValue;
+            float bestSqrDistance = float.MaxValue;
+
+            for (int i = 0; i < count; i++)
+            {
+                Collider candidateCollider = overlapBuffer[i];
+                if (candidateCollider == null)
+                {
+                    continue;
+                }
+
+                ITargetable candidate = candidateCollider.GetComponentInParent<ITargetable>();
+                if (candidate == null || !IsAlive(candidate) || !candidate.IsValidTarget)
+                {
+                    continue;
+                }
+
+                // 只认友方：中立单位与敌方一律排除（IsEnemy 已含中立排除，这里只需再排一次中立）。
+                if (candidate.Team == TeamType.Neutral || IsEnemy(candidate))
+                {
+                    continue;
+                }
+
+                if (candidate.TargetTransform == null)
+                {
+                    continue;
+                }
+
+                HealthComponent candidateHealth = candidateCollider.GetComponentInParent<HealthComponent>();
+                if (candidateHealth == null)
+                {
+                    continue;
+                }
+
+                float healthPercent = candidateHealth.HealthPercent;
+                if (healthPercent > maxHealthPercent)
+                {
+                    continue;
+                }
+
+                float sqrDistance = (candidate.TargetTransform.position - origin).sqrMagnitude;
+
+                // 血量不同则取更少的；血量相同（浮点近似相等）时取更近的。
+                // 加上这条距离兜底是为了让结果【确定】：两个满血小兵的血量百分比完全相等，
+                // 只比血量会让返回谁取决于物理查询的遍历顺序，AI 的表现会随机抖动。
+                bool betterHealth = healthPercent < bestHealthPercent - 0.0001f;
+                bool tieButCloser = Mathf.Abs(healthPercent - bestHealthPercent) <= 0.0001f &&
+                                    sqrDistance < bestSqrDistance;
+
+                if (betterHealth || tieButCloser)
+                {
+                    bestHealthPercent = healthPercent;
+                    bestSqrDistance = sqrDistance;
+                    best = candidate;
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// 校验"现在能不能做物理查询"，并在缺少 EntityBase 时报一次错。
+        /// 抽出来是为了让 FindNearestEnemy / CollectEnemiesInRange 共用同一份前置判断，
+        /// 避免两处各写一遍导致"一条路径报错、另一条静默返回"。
+        /// </summary>
+        private bool CanQuery()
+        {
+            if (Owner == null)
+            {
+                if (!hasReportedMissingOwner)
+                {
+                    hasReportedMissingOwner = true;
+                    Debug.LogError(
+                        $"[TargetingComponent] {name} 上找不到 EntityBase，无法判断阵营，索敌功能不可用。" +
+                        "请确保 EntityBase 与 TargetingComponent 挂在同一个 GameObject 上。", this);
+                }
+
+                return false;
+            }
+
+            // 半径为 0 表示该单位不索敌（正常语义），静默返回而不是报错。
+            return detectionRadius > 0f;
+        }
+
+        /// <summary>执行一次非分配的球形范围查询，返回写进 overlapBuffer 的碰撞体数量。</summary>
+        private int QueryOverlap(Vector3 origin)
+        {
+            return Physics.OverlapSphereNonAlloc(
+                origin, detectionRadius, overlapBuffer, targetLayers, QueryTriggerInteraction.Ignore);
+        }
+
+        /// <summary>
+        /// 把一个碰撞体解析成"当前合法的敌方目标"。任一条件不满足都返回 false。
+        /// 抽出来是为了让两个查询方法共用完全相同的筛选口径（阵营 / 存活 / 可选中 / Transform 有效）。
+        /// </summary>
+        private bool TryResolveCandidate(Collider candidateCollider, out ITargetable candidate)
+        {
+            candidate = null;
+
+            if (candidateCollider == null)
+            {
+                return false;
+            }
+
+            // 用 GetComponentInParent 而不是 GetComponent：碰撞体通常挂在模型子节点上，
+            // 而 EntityBase / ITargetable 实现位于根节点，向上查找才能稳定命中。
+            candidate = candidateCollider.GetComponentInParent<ITargetable>();
+
+            if (candidate == null)
+            {
+                return false;
+            }
+
+            // 过滤自身、友方、已死亡/不可选中目标。
+            if (!IsEnemy(candidate) || !candidate.IsValidTarget)
+            {
+                candidate = null;
+                return false;
+            }
+
+            if (candidate.TargetTransform == null)
+            {
+                candidate = null;
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>

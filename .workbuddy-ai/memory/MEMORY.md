@@ -1,131 +1,116 @@
 # MOBA Demo 项目记忆
 
-## 硬约束
-- `README.md`（需求）> `MOBA_Demo_Plan.md`（实施）；先对齐再动手，不自行发明架构。
-- 单机 Unity3D 顶视角 MOBA Demo；MonoBehaviour 组件化 + 基础 FSM + NavMeshAgent，不做网络/ECS。
-- ScriptableObject = **只读模板**，运行时状态绝不回写；组件间走公开方法 + C# 事件，禁止跨类改私有字段。
-- **表现与逻辑分离**：逻辑层单向广播事件，表现层只读订阅；动画/特效/UI 严禁反向影响伤害判定。判定标准：**关掉它，对局结果会不会变？会变 = 逻辑，不变 = 表现**。据此裁定 `Projectile`/`AreaEffectZone` 属逻辑层（效果载体）。
-- 场景装配必须走 Editor 脚本（`AutoSceneBuilder`），严禁手动拖拽依赖。
+## 铁律
+- README（需求）> Plan（实施）；代码偏离文档就改代码，文档落后就改文档。
+- 单机 Unity 顶视角 MOBA：MonoBehaviour + FSM + NavMeshAgent；不做网络/ECS。
+- SO = 只读模板，运行时不回写；组件间只走公开方法 + C# 事件。
+- 表现/逻辑分离，判据「关掉它对局结果会不会变」；Projectile / AreaEffectZone 属逻辑层。
+- 场景装配只能走 Editor 脚本（AutoSceneBuilder）；工具必须幂等（ManagedRootNames 清理、guid 被引用资产只 CopySerialized、SerializedObject 注入）。
 
-## 环境与工具
-- 团结引擎 Tuanjie 2022.3.61t14；场景扩展名 **`.scene`**；主场景 `Assets/Scenes/MainScene.scene`。
-- Git `origin`=`github.com/Jaxuu/MOBA-Demo.git`，分支 **main**；推送必须走 `gh` 凭据通道（默认 GCM 静默挂起且报错误导）。
-- 无 .NET SDK → 只能静态检查：`check_unity_cs.py [--fix-bom]`（改过脚本须跑 `test_check_unity_cs.py`，现 13 用例）+ `check_missing_usings.py`（缺 using → CS0246）。替代不了编译，类型成员须人工核对。
-- `.cs` 必须 **UTF-8 with BOM**（Write 不写 BOM，写完必跑 `--fix-bom`）；协程内只能 `yield break;`（`return;` 报 CS1622 且查不出）。
-- 真实编译看 `C:\Users\14041\AppData\Local\Tuanjie\Editor\Editor.log`（Tuanjie 不是 Unity）；`error CS` 是**累计值**，须先 `grep -n "CompileScripts"` 找最后一次真实编译再切分；编辑器失焦不刷新。
-- **校验引擎 API 是否真实存在**：`grep -o 'M:UnityEditor\.[A-Za-z.]*' "C:/Program Files/Tuanjie 2022.3.61t14/Editor/Data/Managed/UnityEditor.xml"`（`UnityEngine.xml` 同理）。猜 API 名会让整个编辑器程序集编译失败。
-- **反查 guid → 资产路径**：`.meta` 里的 guid 是 base64、与场景内 32 位十六进制对不上。唯一可靠来源 = `Editor.log` 的 `Start importing <Assets/...> using Guid(<hex>)`。
-- 装配结果不对时不要猜：读 `Editor.log` + 直接 `grep` 资产文件看序列化结果（比看告警可靠）。
+## 环境
+- 团结 Tuanjie 2022.3.61t14；内置渲染管线；主场景 Assets/Scenes/MainScene.scene。
+- 静态检查 `check_unity_cs.py [--fix-bom]` + `check_missing_usings.py`；.cs 必须 UTF-8 BOM；协程内只能 `yield break;`；[Tooltip]/日志里的 ASCII 双引号会提前闭合（CS1002）→ 用「」。
+- 取证源 = Tuanjie/Editor/Editor.log；error CS 是累计值，先 grep 最后一次 CompileScripts。
+- 层表只在编辑器启动时读一次：改 TagManager.asset 后 NameToLayer 返回 -1。正确做法 = `SerializedObject(LoadAllAssetsAtPath("ProjectSettings/TagManager.asset")[0])` → `FindProperty("layers")` → 写空槽 + SaveAssets。
+- 改 NavMeshData 后 `RemoveAllNavMeshData` → `AddNavMeshData`；改 Transform 后 `Physics.SyncTransforms()`。
+- **Unity 自动化两个致命坑**：① `PlayerSettings.runInBackground` 默认 false → 编辑器失焦时播放循环被节流（`Time.time` 卡住而 `unscaledTime` 正常），"自动进 Play 跑 N 秒"必须先置 true；② 改 PlayerSettings 用 `execute_code` 写即可。排查"游戏时间不推进"：全仓 grep `timeScale` → 比对 `Time.time` vs `unscaledTime`。
 
-## 命名空间铁律
-- `MOBA.<一级目录名>`；例外 `ScriptableObjects`→`MOBA.Data`、`Debug`→`MOBA.Debugging`、`Editor`→`MOBA.Editor`。
-- `MOBA.<X>` 的 X 不能与 UnityEngine 类型同名（`MOBA.Debug` 曾致 54 条 CS0234 + Safe Mode）；解法是改命名空间，别名救不了。
-- 引用其它命名空间的类型必须补 `using`（C# 只自动搜索当前命名空间及父级前缀）。
+## 命名空间与生命周期
+- MOBA.<一级目录>；例外 SO→MOBA.Data、Debug→MOBA.Debugging、Editor→MOBA.Editor、VFX→MOBA.VFX；不得与 UnityEngine 类型同名。
+- Awake 缓存引用、Start 注入配置（EntityBase.ApplyStats，Combat 先于 Targeting）；动态创建须 AddComponent 全完成后才 Initialize。
+- OnValidate 在 AddComponent/ApplyModifiedProperties 瞬间同步触发 → 校验改 `EditorApplication.delayCall`。
+- Instantiate 时 OnEnable 先于 Initialize → 读阵营/配置的表现组件必须用 Start。
 
-## 生命周期与动态创建
-- 组件引用 `Awake` 缓存，配置注入 `Start`；「配置→组件」只在 `EntityBase.ApplyStats` 一处（**Combat 先于 Targeting**）。
-- 动态创建：**所有 AddComponent 完成后**才 `Initialize(stats[,team,type])`；此前 `entity.Health/Combat/...` 全 null，必须 `GetComponent<T>()`；`hasInitialized` 防 Start 重复注入（否则回满血）。
-- 编辑模式 Awake 不执行 → `entity.Health/Combat` 恒 null；编辑器工具只能读 `Team/EntityType/StatsData`。
-- **`OnValidate` 会在 `AddComponent` / `ApplyModifiedProperties()` 的同一瞬间被同步调用** → "先挂组件、后注入 statsData"必然在那一刻拿到 null，刷出假告警。修法：校验改 `EditorApplication.delayCall` 延迟（`EntityBase` 已有先例），并在工具收尾加确定性校验方法。
+## 战斗 / AI
+- IsValidTarget 是唯一合法性入口；接口引用销毁后不变 null，先 `is UnityEngine.Object`；无 Collider 的单位永远索敌不到。
+- MoveTo 返回 bool 当「已下令」标记；TryAttack 先写 nextAttackTime 再 TakeDamage；普攻必须传来源 Owner。
+- 滞回：Chase↔Attack 退出 ×1.15；Abandon = 追击发起半径×1.5、Leash = ×2.0（Leash 唯一清除时机 = MoveState 抵达路径点）。
+- 感知唯一入口 `EntityAIController.TryDetectEnemy`（0.25s 节流）；塔/基地/玩家英雄都不挂 EntityAIController。
+- 死亡收尾在 `HeroController.HandleDied`；攻击指令唯一存放处 = `TargetingComponent.CurrentTarget`。
+- `MovementComponent` 是 NavMeshAgent 唯一操作者（SetAgentEnabled / WarpTo）；不得直接持有 NavMeshAgent。
 
-## 接口与组件
-- `IDamageable`=`HealthComponent`；`ITargetable`=`EntityBase`（不同组件，Combat 用 `GetComponentInParent<IDamageable>()` 桥接）；**接口引用销毁后不变 null**，先做 `is UnityEngine.Object` 存活检查。
-- `IsValidTarget` 是唯一目标合法性入口（未销毁 + activeInHierarchy + 有 Health + 未死 + isSelectable）。
-- `MovementComponent` 唯一驱动 NavMeshAgent，速度只走 `SetMoveSpeed()`；建筑无 Movement → `EntityBase.Movement` 可能 null。
-- **`MoveTo` 返回 bool**，FSM 必须用返回值作"已下令"标记，否则失败后永不重试、永久卡死。
-- `TryAttack` 顺序：解析 IDamageable → 判 IsDead → 写 `nextAttackTime` → `TakeDamage`（**先重置冷却再结算伤害**，防同帧重入打出第二发）。
-- 地面拾取用 Layer `"Ground"` + `NavMesh.SamplePosition`；旧输入 `Input.GetMouseButtonDown(1)`；日志分级 LogError/LogWarning/Log，重复告警用一次性 `hasReportedXxx`。
-- `ValidateDependencies`：RequiresMovement=Hero/Minion，RequiresCombat=非 Base。**无 Collider 的单位永远索敌不到且不报异常**。
-- **依赖自校验正确姿势**：`Awake` 校验只适用于"挂载时必然同时存在"的硬依赖（如 `[RequireComponent]`）；对"可能晚挂"的依赖（`EntityBase` 等）必须"延迟解析 + 首次使用时 `LogError` 一次"。静默失效典型症状：技能放不出去、蓝和 CD 都没动、Console 一片安静。
+## 技能
+- 链路 PlayerSkillController → SkillComponent.TryCast → 前摇 → Projectile/AreaEffectZone → SkillEffectResolver（唯一结算入口）；扣蓝写 CD 在链尾 → 拒绝零副作用是结构保证。
+- 事件：`OnCastStarted`（校验通过后）/ `OnSpellReleased`（真的生成效果载体后）。**没有 OnSpellCast 这个事件。**
+- Self 分派靠显式字段 `spawnZoneAtSelf`，绝不能用 areaDuration>0 反推。通用教训：**意图必须显式字段表达，不能从别的字段默认值反推**。
+- 新枚举值一律追加末尾（插中间会让旧资产被静默重新解释）。
+- 前摇为 0 不上控制锁（上锁会 Stop 清路径且同帧不恢复 = 瞬发变刹车）。
+- 移速修饰：减速与加速共用一份原速快照，系数相乘；`ApplySpeedModifier` 是唯一写入点。
+- 强化普攻状态存 BuffComponent（TryConsume 原子取走）；沉默不上控制锁，只在 TryCast 状态链拦一道。
+- `skillSlots[4]` 下标 = `(int)SkillSlot`；**AI 英雄按实例注入 4 槽（Q/W/E/R），玩家走预制体直挂**。
+- **技能槽规则 = 实例整体接管**：`SkillComponent.Initialize` 只要发现任意一槽非空就整体跳过模板（`EntityStatsData.skillQ..R` 已废弃、由工具清空）。**绝不能用「只补空」**。
+- **AI 技能注入必须「无条件整体覆写」**：写成「抽到才写」会让池子异常时 AI 静默继承预制体的盖伦 QWER（症状 = 10 个英雄同一套技能、Console 全静音）。池子 = 10 个（Skills/Pool/），每人无放回抽 4 个，seed 2026 + 序号×7919。
+- 弹道 prefab 严禁 Collider；范围场同 tick 去重 + `OverlapSphereNonAlloc(32)`。
+- `SkillComponent.LastCastGroundPoint`：表现层要知道地面 AOE 的真实落点（与 LastCastTarget 同一模式）。
 
-## 感知 / FSM（`MOBA.AI`）
-- 感知唯一入口 `EntityAIController.TryDetectEnemy(out ITargetable)`（0.25s 节流）；Idle/Move/Chase 禁止直接调 `FindNearestEnemy`（GC Alloc）；缓存校验必须含「仍在索敌半径内」，否则 Chase↔Move 每帧互切；卡死检测：停滞 1s → 清"已下令"标记 → 重下 MoveTo。
-- `StateMachine` 纯 C# 类；`ChangeState`：旧 `Exit()` → 赋值 → 新 `Enter()`；同状态 `ReferenceEquals` 忽略；状态名用字符串字面量（禁 `nameof`）；`TryEnter*State` 返回 bool 必须判。`EntityAIController` Awake 只 `new StateMachine()` + 取 EntityBase（**禁读 entity.Health**），保持纯逻辑。
-- `IdleState` 先 `SetTarget` 再 `TryEnterChaseState()`；`DeadState` 收尾在 `Enter`：停寻路 → 清目标 → 禁用 Collider+NavMeshAgent → `SetSelectable(false)`。
-- `LanePath.GetWaypointPosition` 越界返回 `transform.position`；蓝红各一条 LanePath，用节点顺序相反表达方向。
+## UI / 表现层
+- PrefabPool 池空返回 null + 一次性告警（绝不 Instantiate）；被拒绝的单位不会自动重试 → 需要重试队列。
+- 血条：`hideWhenFull` 会让满血单位完全无条（英雄复活即满血 = 观感上英雄没血条）；血条/飘字由 Manager 订阅 EntityRegistry 统一挂，预制体零改动。
+- CreatePrimitive 生成的占位物自带 Collider：必须 enabled=false + Destroy 并置 Ignore Raycast(2) 层，否则会拦截右键拾取射线 = 表现反向影响逻辑。
+- **实体配色 = TeamColorView 的四格表**（阵营 × EntityType）：蓝英雄/红英雄/白小兵/黑小兵；**上色只有运行期一个写入者**。编辑器 Scene 视图里英雄仍是预制体默认绿色，**必须进 Play 才看到阵营色**。
+- 技能特效按 SkillData 的**语义字段**分派（不是 Q/W/E/R 槽位）—— AI 的 4 个技能各不相同，按槽位写死会整体错位。
+- **`AnimationComponent` 是唯一引用 Animator 的组件**，且**不聚合到 EntityBase**（自解析依赖）。
+- 动画映射：速度取 `MovementComponent.CurrentVelocity` 模长 / 配置移速（**不能用 `MovementComponent.Speed`，那是配置值，会得到"永远在跑"的动画**）；`SetFloat(id, v, dampTime, dt)` 交给引擎阻尼；参数哈希在 Awake 由序列化字段名解析。
+- 事件配对：**动画订阅 `OnCastStarted`（前摇开始就摆动作），特效订阅 `OnSpellReleased`（效果落地才炸开）**——刻意相反。
+- `CombatComponent.OnAttackPerformed` 在 **`TryCommitAttack`** 广播（近战与塔弹道共用的唯一收敛点）；语义是「打出去了」不是「打中了」。
+- `ProjectileSpawner.OnProjectileSpawned` 是订阅弹道 `OnHit` 的**唯一接入点**（弹道不在 EntityRegistry 里、无法枚举）。
+- 池的分工：`Core/PrefabPool<T>` 池化"带组件的视图"（模板须已挂组件、归还只做 SetActive）；`VFX/SimpleObjectPool` 池化"任意 GameObject 特效"。两者都是**耗尽返回 null + 一次性告警，绝不 Instantiate**。
+- `VfxSpawner`（正式层，`VfxSpawnerRoot`）与 `WhiteboxVfxManager`（白盒占位，`VfxRoot`）是**两个独立根对象**：三特效槽位为空时 VfxSpawner 完全惰性；美术接入后删 VfxRoot。
+- 动画接线必须排在**实例化英雄之前**（步骤 15a）。
+- 控制器 `UnitAnimator.controller`：5 状态 + 4 参数 + 6 过渡，**幂等策略 = 已存在一律沿用（只加不减不改）**；`CreateAnimatorControllerAtPath` 的 `defaultState` 为 null，必须显式设 Idle。
+- **一个组件上只能有一个 `SerializedObject` 包装**：包两次只 Apply 后一份，前一份的写入被静默丢弃。
+- 预留槽位路径（导入后重跑菜单即自动接入）：模型 `Assets/Art/Models/{Heroes/HeroModel,Minions/MinionModel}.prefab`；特效 `Assets/Prefabs/VFX/{HitVfx,CastVfx,ProjectileHitVfx}.prefab`。
 
-## 防震荡不变量（改阈值前必读）
-| 通道 | 进入 | 退出 |
-|---|---|---|
-| Chase↔Attack | d ≤ AttackRange | d > AttackRange × 1.15 |
-| Move/Idle↔Chase | 索敌命中 | d > 索敌半径 × 1.5 |
-| Move↔Idle | 还有路径点 | 路线走完 |
-| 无追击能力 | `CanChase` 拦下 | — |
-| 已被牵出界 | `IsBeyondChaseLeash` 拦下 | — |
-- 死区内 `AttackState` **刻意什么都不做**（架构师裁定）；系数用 `Mathf.Max(1f, factor)` 夹住。
-- 牵引极限：`ChaseAbandonDistance`（索敌×1.5，量**与目标距离**）、`ChaseLeashDistance`（索敌×2.0，量**锚点距离**）；锚点在 `ChaseState.Enter` 仅 `!hasChaseStartPos` 时记录，**唯一**清除时机 = `MoveState` 抵达路径点。
+## 阶段八地图
+- 桥面 120×14；可行走半宽 6.5 < 塔射程 7.5，相邻塔间距 15 = 2×7.5（改桥宽/塔射程必须成对改）。
+- 建筑挖洞 = 烘焙期方案：塔/基地 Body 设 Building 层（TagManager 9），烘焙掩码 Ground|Building；层缺失步骤 0 中止；**建建筑必须早于烘焙 NavMesh；建筑的"白盒让位"必须晚于烘焙**（先关掉就没洞 → 单位穿模）。
+- LanePath 节点禁止落在建筑中心（洞心不可达 → HasReachedDestination 恒假 → 整队发呆）。
+- 四条线：小兵 z=+2.5、英雄 z=-2.5（必须偏离桥心，否则绕洞左右等价 → 单位在塔前摆动）。
+- arrivalStoppingDistance=0.5；avoidancePriority 英雄 30 段 / 小兵 60 段轮转（全同值 → 窄道顶死）。
+- 索敌半径只决定「看得见」，`chaseEngageRange` 才决定「值不值得脱线」。
+- **英雄编制由常量给出、由校验兜底**：PlayerHeroCount=1 / BlueAiHeroCount=4 / RedAiHeroCount=5 / TotalHeroCount=10；HeroSquadSize 是「蓝方席位」的派生值。ValidateHeroRoster 读场景重数（含全场景 EntityType.Hero 计数，抓游离副本）；ValidateAiSkillAssignment 读回 9×4 技能槽核对资产路径。**改编制要同时改常量与出生点数量**。
 
-## 建筑（`MOBA.Units`）
-- 塔/基地**不挂 EntityAIController**，用 `TowerController` 直线逻辑：Awake 只取 EntityBase；Start 用 `GetComponent<T>()` 解析并订阅 `OnDied`；Update = ClearInvalidTarget → 超交战半径 ClearTarget → 节流索敌 → TryAttack。
-- **交战半径 = `CombatComponent.AttackRange`**，规则只在 `ApplyStats` 对 `EntityType.Tower` 注入（不放 TowerController.Start，Start 顺序不确定）。
-- 死亡收尾统一 `hasHandledDeath` + `enabled=false`；`destroyOnDeath` 默认 false；`BaseCoreController` 只广播 `static event Action<TeamType> OnBaseDestroyed`，不判胜负；静态事件配 `[RuntimeInitializeOnLoadMethod(SubsystemRegistration)]` 重置。
-- 基地 = 空根节点 + `CreatePrimitive(Cube)` 子节点 Body（2.5³，不用 3³：会视觉贴到英雄胶囊）；碰撞体复用 Cube 自带 BoxCollider（手工加会让同一基地在 `OverlapSphere` 里出现两次）；属性用确定性资产 `ScriptableObjects/BaseStats.asset`（生命 3000，用占位查找会退回 MinionStats 的 100 生命 → 几波兵推掉基地）。
+## 编辑器期陷阱（实机踩过）
+- **MonoBehaviour 的字段初始化器里只能放常量与 new**：`LayerMask.NameToLayer` / `Shader.Find` 等引擎查询放进去会抛「not allowed to be called from a MonoBehaviour constructor」；静态字段初始化器还会升级成 TypeInitializationException，**连 `Undo.AddComponent` 一起失败**（症状：对象建出来了、组件没挂上、组装却"成功"）→ 一律挪到 Awake。
+- **`OnValidate` 不能基于跨字段推断改写别的字段**：脚本加载时就会跑，新增字段在旧资产里尚未序列化 → 必然取默认值 → 误判（还会抹掉别处赖以判断的旁证）。归一化交给工具在组装时显式做。E 审判曾因此退化成"对自己造成 18 点伤害"。
+- **工具注入字段前必须确认字段真的存在**：往不存在的字段写引用会每次组装刷红色假错误，比没有校验更糟。改字段名要同时改工具与 `Validate*Setup`。
+- **改序列化字段名 = 一次静默数据迁移**：资产里存的旧值被 Unity **静默丢弃**（不报错）→ 新字段全 null。改名后必须让工具**读回校验**（`allyMaterial → allyHeroMaterial` 就是这样让红方小兵没变黑的）。
+- **删除 partial class 里的私有方法前必须全仓 grep**：它其实是跨分册共用的工具（删 `PatchObjectReferenceIfUnset` 时漏看塔与 UI 分册仍在调用 → 差点 CS0103）。
+- **`#region` 必须配对 `#endregion`**（少一个报 CS1038，错误指向【文件末尾】）；`#if` 同理（CS1027）。**往已有 region 里插新 region 时最容易漏**——`check_unity_cs.py` 已内置这项配对检查。
 
-## 对局编排（`MOBA.Gameplay`）
-- `MinionSpawner`：一"方"一条兵线（阵营+出生点+LanePath 绑定），无阵营分支；**不在 Start 出兵**；注入顺序不可颠倒：`entity.Initialize(stats, team, Minion)` → 然后 `ai.InitializeAI(lane)`；`OnDisable` 必须 `StopSpawning()`；`StartSpawning()` 返回 bool，调用方按返回值计数。
-- `MatchController`：延迟 `StartDelay` 统一出兵；只认第一次基地摧毁；`GetOpponentTeam` 是 public static；`FreezeBattlefield()` 遍历 `EntityRegistry.Snapshot()` 停用 AI + TowerController 并 `Movement.Stop()`，单向无解冻。
-- 中立阵营：`IsEnemy` 退化路径加 `Team == Neutral → false`。
+## 调试方法论
+- **「写进去了」≠「生效了」**：同一字段若在运行期还会被写一次（如 `EntityBase.ApplyStats`），编辑器侧的"读回序列化字段"校验只能证明磁盘上写了什么，**看不见运行期覆盖**。这类字段要么收敛成单一写入者，要么把优先级写成显式规则 + 运行期留一条自证日志（如 `HeroAIController` 启动时打印最终生效的 4 个技能）。
+- 排查实机问题**先比对「上次组装」与「上次编译」的日志行号**：能立刻区分"代码没生效"与"根本没重跑组装菜单"。
+- 取证一律读**落盘资产 YAML**（场景/预制体/SO），不要读代码意图。
 
-## 玩家英雄（`HeroController` + `MOBA.Controllers`）
-- **英雄刻意不挂 EntityAIController**（FSM 会与玩家指令争夺 Movement/Combat）；英雄**没有 DeadState**，死亡收尾由 `HeroController.HandleDied` 承担（停寻路→清目标→禁指令层→禁 NavMeshAgent+Collider→SetSelectable(false)→退订→广播 `OnHeroDied`）。
-- `PlayerCommandController`：右键射线 → 比较最近敌方单位与最近地面点命中距离决定攻击/移动；点自己与友方忽略；**攻击指令存在 `TargetingComponent.CurrentTarget`**（唯一存放处）；执行器每帧 ClearInvalidTarget → 射程内 Stop+TryAttack / 射程外按 `chaseRepathDistance` 追击；**不设牵引极限**。
-- `CameraController`：固定世界偏移 + `SmoothDamp`，`LateUpdate` 取位置，不跟随旋转；`SnapToTarget()` 编辑模式可用。偏移默认 **`(0,10,-10)`**（45°）；**平移/缩放是显示层增量**（`panOffset`/`zoomScale`，都不写进 `offset` 字段）：期望位置 = `目标 + offset*zoomScale + panOffset`，**注视点必须跟着 panOffset 平移**（否则退化为绕英雄转圈）；中键拖拽平移、中键双击回中、滚轮缩放。
+## 阶段九资产实装（10 英雄 + 建筑 + 占位动画/特效已接入）
+- **10 个英雄各挂不同模型**：席位号 ↔ `HeroChampionNames`（0=Garen 玩家 / 1..9 = Ashe, Darius, Lux, Annie, MasterYi, Ahri, Teemo, Yasuo, Zed）。模型**按实例**挂（预制体只能有一份 → 挂预制体就等于 10 个盖伦），阵营材质也按实例写进 TeamColorView。
+- **建筑用 CD 原生模型**：`turret/skins/base/turret_base.skn`（取 Base/Stage1-3）+ `nexus/nexus.skn` + `inhibitor/inhibitor.skn`，**都自带蓝/红双贴图**。**上一轮"CD 不镜像建筑网格"的结论是错的** —— 要完整拉目录清单逐个核对。
+- **`Model` 子节点名是幂等的前提**（`transform.Find("Model")` 存在即跳过），改名会导致每次组装多叠一层模型。
+- **英雄预制体外观在 `Body` 子节点；小兵预制体网格与碰撞体都在根节点** → 工具 `ResolveWhiteboxVisual` 两种结构都要兜住。
+- **白盒让位只关 Renderer、绝不碰 Collider**（索敌/拾取依赖它）。
+- **配色材质必须带贴图**：`TeamColorView` 写的是整个 `sharedMaterial`，纯色材质盖到模型上会把贴图抹掉 → 工具「模型贴图材质优先、纯色兜底」。
+- **白盒残留已清**：`EntityVisuals.cs` 已删除（三处调用点**必须成对删** —— 只删隐藏会留下"只恢复不隐藏"的孤儿写入者）；`WhiteboxVfxManager.enableVfx` 由工具置 false。**代价：正式特效未导入前技能没有任何画面反馈**。
+- 动画：`Assets/Art/Animations/{Idle,Run,Attack,Spell,Die}.anim` 是**程序化占位片段**（驱动 `Model` 子节点 Transform，不驱动骨骼）。注入规则 = **状态的 motion 为空才写**，不覆盖美术的连线。真片段来源（Mixamo/LoL .anm）全部受阻。
+- 特效：5 个程序化 `ParticleSystem` 预制体（Hit/Cast/ProjectileHit/Shield/Zone）注入 VfxSpawner **五个通道**；护盾与范围场**按 SkillData 语义字段分派**。预生成容量 40（16 会在 5v5 团战里被打空）。
+- 实机判据：组装 6 项校验全绿 + Play 期间 **0 Error**；`heroes: withModel=10/10`、`minions: withModel=11/11`；英雄材质 `HeroModelBlue/Red`。**Play 期间的 Warning 全部是阶段八既有的拥堵/牵引诊断，不是回归**。
 
-## 阶段六：技能系统（已实机验收通过）
-- **命名空间 `MOBA.Skills`**（`Assets/Scripts/Skills/`）。链路：`PlayerSkillController`(Q/W) → `SkillComponent.TryCast(slot, groundPoint, target, out failReason)` → 前摇(逻辑计时) → `ProjectileSpawner`→`Projectile` / `AreaEffectZone` → **`SkillEffectResolver`（伤害/Buff 唯一结算入口）** → `HealthComponent` / `BuffComponent`。
-- **`TryCast` 校验链顺序：①自身状态(死亡/眩晕/前摇) → ②配置 → ③冷却 → ④蓝量 → ⑤距离 → ⑥目标合法性**；`isCasting` 排在冷却之前（"刚放完立刻再按"命中的是前摇硬直）。**三参重载已删**，9 个拒绝分支各给人话原因 + 量化信息。
-- **拒绝路径零副作用是结构保证**：扣蓝与写 CD 排在整条校验链之后 → 四条拒绝路径不广播任何事件 → 表现层自然不播。
-- **眩晕与施法前摇共用同一把锁**（`SetMovementLocked` / `SetAttackLocked`），两个持有者互相检查对方状态。
-- **弹道自研距离判定，绝不用物理碰撞体**（命中条件含"距离 ≤ 本帧位移"防高速穿透；抵达判定点必须无条件回收）。**弹道 prefab 严禁带 Collider**（否则成为右键可点候选、占索敌候选位）。
-- **范围场必须对同一 tick 去重**（一个单位常有多碰撞体，不去重 = 范围伤害翻倍）；用 `OverlapSphereNonAlloc` + 32 缓冲。
-- **`BuffComponent` 不是英雄专属**：减速/眩晕/护盾都经它落地，**任何需要被控制的单位都必须挂它**（含 `MinionPrefab`）。缺它的症状 = 运行期一条"找不到 BuffComponent"后静默放弃（技能放了、圈画了、小兵没慢）。
-- 配置注入"双保险"：`EntityStatsData.skillQ/skillW` 为主，`SkillComponent` 直挂为兜底。**`PatchHeroStatsGaps` 只补空字段、不覆盖、不碰资产本体**（保 guid）；技能资产必须 `Hero` 前缀（被 `IsHeroDedicatedAsset` 拦下）。
-- 刻意不做：`BuffData` 资产（无"非技能来源的 buff"）、`SkillTargetSelector`（三处已覆盖）、`SpawnPoint.cs`。**「指定友方单位」未实现**（`TryValidateTarget` 只接受敌方）——友方护盾技能的已知扩展点。
+## 逆向 LoL 资产的工具（`.workbuddy-ai/tools/`）
+- `lmesh2obj.py`：`.lmesh`（lol-model-viewer 私有格式，magic 604210091，顶点 52B）→ OBJ。**仓库里没有转换器源码**，格式是从 `viewer.js` 的 `loadMesh`/`Lol.Vertex` 读出来的。
+- `skn2obj.py`：`.skn`（LoL 原生）→ OBJ。头部 0x98 / 索引块 u16 / 顶点块 52B（`pos@0, boneIdx@12, weights@16, nrm@32, uv@44`）/ 末尾 12B。
+- **解未知二进制的通用方法**：用两种布局假设分别解析，**越界索引为 0 的那个才是对的**；再叠加"法线必须是单位向量"与"块边界 == 文件长度"两条交叉判据。脚本内置校验，任一条不满足就报错退出，**绝不输出疑似垃圾的资产**。
+- CommunityDragon 可用路径：图标 `plugins/rcp-be-lol-game-data/global/default/assets/characters/<champ>/hud/icons2d/*.png`（或从 `v1/champions/<id>.json` 的 `spells[].abilityIconPath` 取精确路径）；网格 `game/assets/characters/<unit>/skins/base/*.skn` + 贴图同目录。
 
-## 编辑器工具（`MOBA.Editor`，`Assets/Scripts/Editor/`）
-- `AutoSceneBuilder`（菜单 `MOBA Demo/一键组装测试战场`，现 2993 行）：清理旧战场 → 兵线 → 蓝红基地+Spawner → MatchController → **地面覆盖+NavMesh 烘焙** → 英雄（资产/材质/预制体/实例/相机）→ 技能资产 → 弹道 → 校验；**只按固定名字清理**自己生成的对象（`ManagedRootNames`），不做全场景扫描。英雄数值：生命 **500** / 移速 **6** / 射程 **2.5**（伤害 25、间隔 1s、索敌 8 自选）。
-- **步骤 8（地面与导航）**：只放大不缩小 / 只动内置 Plane 网格（按 `sharedMesh.name=="Plane"`）/ 保持正方形；范围 = `GetKeyPoints()` 外扩 8m（38×38 中心 (-1,0)）；自愈清理 Ground 上手工 `NavMeshSurface` → `NavMeshBuilder.CollectSources`(配 `NavMeshBuildMarkup`) + `BuildNavMeshData` 烘焙 → `EditorUtility.CopySerialized` **原地更新**场景 NavMeshData 资产 → `NavMesh.CalculateTriangulation()` 验证。**改完 Transform 必须 `Physics.SyncTransforms()`**。
-- **资产 guid 铁律**：任何**按 guid 被场景引用**的资产（NavMeshData、材质、预制体…）都**不能**用 `AssetDatabase.CreateAsset` 覆盖重建（会先删旧资产、guid 改变、场景引用断链）；必须原地更新内容（`CopySerialized` + `SetDirty` + `SaveAssets`）。
-- **编辑器导航世界不自动刷新**：改 NavMeshData 后 `CalculateTriangulation`/`SamplePosition` 仍读旧数据 → 修法 `NavMesh.RemoveAllNavMeshData()` → `NavMesh.AddNavMeshData(baked)`（先清再加）。
-- **步骤 1 附加「幽灵对象清理」**：名字命中 `ManagedRootNames`、**但有父节点**的游离副本 → `Undo.DestroyObjectImmediate`；宿主变空壳且名为 Unity 默认名时一并收掉。判定收窄为「名字命中 + 有父节点」，不做全场景组件扫描。
-- 写 private `[SerializeField]` 必须用 `SerializedObject`+`SerializedProperty`；枚举写 `intValue`；**要被工具注入的字段必须 `[SerializeField]`**。Unity 内置组件的**公开属性**（`Image.type` / `Text.font` 等）直接赋值即可。
-- 资产查找 `AssetDatabase.FindAssets("t:<Type>", folders)`；`t:GameObject` 会命中 .fbx，取预制体限定 `.prefab`；专用资产必须排除出通用查找（`IsHeroDedicatedAsset()` 按 `Hero` 前缀过滤）。
-- 创建/删除走 `Undo.*`（同一撤销组）；临时对象不登记 Undo，用完 `DestroyImmediate`；收尾只提示不改场景。
+## MCP 使用要点（`mcp__unityMCP__*`）
+- 先 `ToolSearch`（tool_names 精确名）再 `DeferExecuteTool`。
+- **`execute_code` 最好用**：能直接跑 C#，绕开各工具的 schema 猜测；但它是 **CodeDom（C# 6）**，别用新语法。
+- `manage_camera` 截图：`capture_source=scene_view` 会**带出全部 Gizmo**（本项目 FSM 调试球会糊满画面）→ 看模型细节用 `game_view` + `view_target`。
+- `refresh_unity(compile="request")` 可强制重编译；`read_console` 支持 `types` 过滤与 `clear`。
+- **模型市场（Sketchfab）与 AI 生成（Tripo/Meshy）都需要 API Key，本机均未配置**。
 
-## 阶段七：UI 与可视化（代码已落地，待实机验收）
-- **`com.unity.ugui: 1.0.0` 已加入 `Packages/manifest.json`**（编辑器内置包，离线可解析）。`UnityEngine.UI` 可用；**TMP 仍不可用**（不在内置包清单）→ 全部文字走旧版 `Text`。
-- **新增 13 个文件**：`Core/PrefabPool.cs`；`UI/` 下 `WorldHealthBarManager/View`、`DamagePopupManager/View`、`HeroHUDView`、`SkillSlotView`、`KillFeedView`、`ScoreboardView`、`RespawnOverlayView`、`UIFontProvider`；`Gameplay/MatchStatsTracker.cs`；`Editor/AutoSceneBuilder.UIAssembly.cs`（partial 分册，步骤 17）。
-- **逻辑层增量（全为新增成员，阶段一~六零改动）**：`HealthComponent.OnDamaged(HealthComponent,float,float,EntityBase)`（**发送者在前**：healthDamage=实际扣减量 / shieldAbsorbed / source；**护盾全吸收也广播**）+ `Revive()`；`ManaComponent.RestoreFull()`；`EntityRegistry.OnEntityRegistered/OnEntityUnregistered`（只在真正增删时广播，`ResetStaticState` 里置 null）；`MatchConfigData.respawnTime`；`HeroController.Revive()/OnHeroRespawned/respawnAnchor`；`MatchController` 复活编排。
-- **表现层挂载策略**：血条与飘字**不由单位挂载**，由 Manager 订阅 `EntityRegistry` 事件统一挂/还池 → **单位预制体零改动**，动态小兵自动覆盖。
-- **`PrefabPool<T>` 契约**：`Get()` 池空返回 null + 一次性告警（绝不 Instantiate）；`Release()` 只 SetParent + 复位变换 + `SetActive(false)`，**视图在自身 `OnDisable` 里退订与复位**（池不认识具体视图类型）；`ActiveItems` 只许遍历不得增删。
-- **血条**：锚点 = Bind 时**一次性测量 collider 合并包围盒顶部**并缓存偏移；billboard = 复制相机旋转；恒定像素高度 = `localScale ∝ 与相机距离`；显隐 = 死亡/满血/相机背后；**隐藏只禁 Canvas 组件、绝不禁自身物体**（禁自身会触发 OnDisable → 自动解绑）。`[DefaultExecutionOrder(100)]` 保证晚于相机 LateUpdate。
-- **飘字**：**共享世界画布 + 子 Text**（1 draw call）；**单管理器循环 Tick**（不给每个飘字挂 Update）；**一次伤害一条飘字**（全吸收→灰蓝"吸收 N"，否则红色实际扣减量）。
-- **复活归属（D4）**：`MatchController` 统筹倒计时（`isRespawning` 独立布尔——**StartCoroutine 会同步执行到第一个 yield**，用协程句柄判断会让订阅方读到"没在复活"），`HeroController.Revive()` 执行逆操作。**三个致命顺序点**：重新订阅 `OnDied` → **先启用 NavMeshAgent 再 Warp** → Warp 失败退化直写坐标并 LogError。
-- **CD 遮罩**：每帧读 `GetCooldownRemaining`（冷却没有变化事件），**秒数只在整秒跳变时写文本**（否则 60 次/秒 ToString 必顶掉 GC≈0）。`Image.fillMethod` 的 setter **会重置 fillOrigin** → 必须先设 fillMethod 再设 fillOrigin；`Image.Origin360.Top = 2`；`fillClockwise` 默认 true。
-- **击杀统计（D3）**：只统计英雄；归属读 `HealthComponent.LastDamageSource`；`MatchStatsTracker` 是**唯一计数器**（计分板只读它）。`OnDied` 是既有 `Action`（无发送者、不能改签名）→ 统计侧用每单位闭包（死亡低频）；受伤高频所以新事件带发送者以避免闭包。
-- **工具步骤 17**：`AutoSceneBuilder` 已改 `partial` + 拆分册；`ManagedRootNames` 增加 `UIRoot`/`WorldUIRoot`。占位白图 = 运行时生成 4×4 PNG → `TextureImporter` 改 Sprite（**所有 Image 共用一张主贴图才能合批**）；字体三级回退（`LegacyRuntime.ttf` → `Arial.ttf` → 运行期 `UIFontProvider` 系统字体）；`ValidateUISetup` 逐个读 `SerializedObject` 给确定性结论。
-- **小地图（`UI/MinimapView.cs`）**：世界 XZ → 小地图 XY 等比例映射，映射范围取 `ComputeRequiredGroundBounds()`（**与 NavMesh 烘焙同一份包围盒**）；标记复用 `PrefabPool<Image>`（不需要新 View 类）；**显隐每帧读 `entity.Health.IsDead`**（英雄死后不注销，用事件还得补"复活→显示"），天然覆盖"死亡隐藏→复活重现"。
-- **uGUI 的两个静默失效**（必须显式查）：`Text.font == null` 与 `Image.sprite == null` 都**不报错、只是不显示**。
-- **补齐既有缺口**：`MatchResultView` 此前从未被装配进场景 → 步骤 17 现已创建并注入（基地摧毁后屏幕上有结算界面）。
-- **封版与推送（2026-09-25）**：`MOBA_Demo_Plan.md` 阶段七标记 ✅ [x] 已完成（含交付结果表 + 13 条验收结论 + 4 项裁决 + 已知风险）；`README.md` §7 表与 §1 当前进度同步。commit **`b8a8d54`** 已推送 `main`（**同时把此前从未推送的阶段五提交 `fb4ad8b` 一并带上**）。
-- ⚠️ **推送命令（项目约定）**：`GIT_TERMINAL_PROMPT=0 git -c credential.helper= -c credential.helper='!gh auth git-credential' push origin main`。注意 `git ls-remote` 不带凭据也能成功（仓库可匿名读）→ **不能用它判断推送凭据是否可用**。
-- ⚠️ **验证场景内容的手段**：按工具生成的对象名（`m_Name: UIRoot` 等）与**序列化字段名**（`barTemplate`/`entryTexts`/`panelRoot`/`worldSize`…）反查；**绝不能用脚本 guid 反查**（`.meta` 的 guid 是 base64，与场景里的 32 位十六进制对不上）。
-- ⚠️ **待实机**：小地图需补一次目视确认；Profiler 量化项（≥60FPS / UI 稳态 GC≈0）仍待采样。
-
-## 白盒期尸体清理（阶段七验收后补丁，2026-09-25）
-- **`Core/EntityVisuals.cs`（新增）**：`SetRenderersEnabled(GameObject, bool)`，用 `GetComponentsInChildren<Renderer>(true)`（基类 Renderer → 覆盖 Mesh/SkinnedMesh/粒子）。**英雄与小兵共用这一个工具**，避免两处各写一遍遍历。
-- **英雄**：`HeroController.HandleDied` 第 5 步隐藏肉身、`Revive` 第 6 步恢复，**严格对称**（漏恢复的症状 = 复活后能走能打但看不见人，极易误判成相机问题）。
-- **小兵**：`EntityAIController` 新增 `corpseLingerSeconds = 2f`（+ `logDeathCleanup`）+ `HandleCorpseCleanup()` + 协程 `DestroyCorpseAfterDelay()` → 立刻隐藏 + 2 秒后 `Destroy(gameObject)`。**两条死亡路径都要接**：`HandleOwnerDied()` 与 `InitializeAI` 里"初始化时已死亡"的兜底分支。
-- 隐藏与销毁**分两步**：死亡瞬间的伤害飘字/击杀播报还在播，飘字锚点就在该单位身上 → 先"看起来死了"再"真的消失"。不用 `Destroy(gameObject, delay)`（无法查询、无法取消）。
-- **销毁单位是安全的**（已核查）：`MinionSpawner` 不持有已生成单位引用；`Projectile` 有 `is UnityEngine.Object` 存活检查；`TargetingComponent.IsAlive` 同族检查；`EntityBase.OnDisable` 自动注销注册表 → 血条归还池、飘字/统计同步退订；`LastDamageSource` 在 `OnDied` 时就已读完。
-- ⚠️ **阶段八迁移点**：本补丁属白盒期权宜手段（逻辑层写 `Renderer.enabled`，虽幂等且结果无关，但严格说属表现）。接入真实模型与死亡动画后应由表现层接管，届时**删掉这两处调用点**（这也是把调用点集中成两处的原因）。
-- ⚠️ **教训（本轮第二次踩）**：在 `[Tooltip]` / 日志字符串里写 ASCII 双引号会提前闭合字符串（CS1002）。写完必须立刻跑 `check_unity_cs.py --fix-bom`（第 7 项「中文越界」专治此类）。
-
-## 状态 / 待办
-- **阶段一~五已封版**（阶段五 commit `2fb7e10`）。两条封版裁决：不做 `SpawnPoint.cs`；相机平移只做中键拖拽（中键双击回中），不做屏幕边缘平移。
-- **阶段六已封版并通过实机验收**。
-- **阶段七已封版并推送到 GitHub**（7.0~7.8，D1~D10 全按建议执行；含小地图、白盒期尸体清理补丁）。commit `b8a8d54` → `origin/main`。**下一步：阶段八（美术表现与表现层分离）**。
-- ⚠️ 待补测：Profiler 白盒稳态 GC Alloc ≤ 1KB/帧、单帧逻辑 < 2ms（风险点：`TargetingComponent.FindNearestEnemy` 用 `OverlapSphere` 每次分配数组 → 换 `OverlapSphereNonAlloc`，`AreaEffectZone` 已有同族范式）。
-- ⚠️ `MainScene.scene` 历史上有"改动只在编辑器内存里"的问题：测出效果后务必 **Ctrl+S 并补一次提交**。
-- `TowerController` 仍"已就位、未挂载"（6B 顺延）；`Assets/Art` 目前只有 `Materials/HeroGreen.mat` 与阶段七新增的 `UI/UIWhite.png`。
-- `EntityStatsData` 缺"旋转速度"；`CancelAttack()` 未实现；`HealthComponent.Heal()` 仍无调用方（故未加 `OnHealed`）。
+## 状态
+- 阶段一~七已封版（commit b8a8d54 已推送）；阶段八 = 5v5 代码已落盘；**阶段九：表现层框架 + 10 个不同英雄模型 + 塔/水晶模型 + 技能图标 + 占位动画 + 粒子特效，已实机验证通过（0 Error）**。
+- **待办**：真动画片段 / 特效贴图 / 地面贴图 / 建筑抑制器模型。
+- **第四轮（实机打回）已修复两个静默失效**：① 小兵配色（字段改名导致旧值被静默丢弃 → 前移注入 + 读回校验 + 运行期报错）；② AI 技能被运行期共享模板覆盖（→ 实例整体接管 + 工具清空模板技能字段 + AI 启动时技能自证日志）。**两个修复都要求重跑一次组装菜单。**
+- 判据：MainScene.scene 的 mtime 必须晚于 NavMesh.asset；组装后核对 Console 无红色错误（NavMesh 9 几何源 / 建筑挖洞 / 技能池 10 / 英雄编制 10 人 / AI 技能 9×4=36 / 实体配色四格 / 血条 N≥18）；Play 后核对 **9 行 `[HeroAIController] … 技能槽已就绪`** 与「蓝英雄蓝 / 红英雄红 / 蓝兵白 / 红兵黑」。待补测 Profiler（GC≤1KB/帧、逻辑<2ms、60FPS）。
+- 编辑器常驻运行时无法 batchmode 编译（工程被锁）：只能用静态检查脚本 + 等编辑器刷新后读 Editor.log 的最后一次 CompileScripts。

@@ -11,7 +11,9 @@ namespace MOBA.UI
     /// 职责边界：
     /// 1. 只订阅 <see cref="MatchController"/> 的两个跳变事件（倒计时开始 / 复活完成），
     ///    倒计时数字每帧读 <see cref="MatchController.RespawnRemaining"/>；
-    /// 2. 【不】自己计时、【不】决定复活时长、【不】碰英雄 —— 它只是一个显示层。
+    /// 2. 【阶段八】只对【玩家英雄】的事件作出反应——MatchController 现在为全部 10 个英雄广播倒计时，
+    ///    若不过滤，任意一个 AI 英雄阵亡都会在玩家屏幕上弹出「已阵亡」遮罩；
+    /// 3. 【不】自己计时、【不】决定复活时长、【不】碰英雄 —— 它只是一个显示层。
     ///
     /// 【为什么本组件挂在常驻激活的物体上，而不是挂在遮罩面板上】
     /// 若本组件挂在会被 SetActive(false) 的面板上，面板一关，Update 就停了，
@@ -127,18 +129,36 @@ namespace MOBA.UI
             }
         }
 
-        /// <summary>倒计时开始：显示遮罩并立刻写一次秒数（避免第一帧空白或显示 0）。</summary>
-        /// <param name="hero">阵亡的英雄（本视图不需要它，保留是为了与事件契约一致）。</param>
+        /// <summary>
+        /// 倒计时开始：显示遮罩并立刻写一次秒数（避免第一帧空白或显示 0）。
+        ///
+        /// 【阶段八：只对玩家英雄响应】MatchController 现在为场上全部 10 个英雄广播倒计时事件
+        /// （AI 英雄同样要复活）。若不过滤，任何一个小兵规模的 AI 英雄阵亡都会在玩家屏幕上
+        /// 弹出"已阵亡"遮罩——那不是玩家自己的死亡，弹出遮罩是明确的错误反馈。
+        /// 过滤放在视图侧而不是 MatchController 侧：事件契约保持不变，
+        /// 将来若要做"队友阵亡提示"，只需再订阅一次并换一种呈现方式。
+        /// </summary>
+        /// <param name="hero">阵亡的英雄。</param>
         /// <param name="duration">倒计时总时长（秒）。</param>
         private void HandleCountdownStarted(HeroController hero, float duration)
         {
+            if (matchController == null || !ReferenceEquals(hero, matchController.PlayerHero))
+            {
+                return;
+            }
+
             Show(duration);
         }
 
-        /// <summary>复活完成：收掉遮罩。</summary>
+        /// <summary>复活完成：收掉遮罩（同样只对玩家英雄响应，与 HandleCountdownStarted 对称）。</summary>
         /// <param name="hero">已复活的英雄。</param>
         private void HandleRespawnCompleted(HeroController hero)
         {
+            if (matchController == null || !ReferenceEquals(hero, matchController.PlayerHero))
+            {
+                return;
+            }
+
             Hide();
         }
 

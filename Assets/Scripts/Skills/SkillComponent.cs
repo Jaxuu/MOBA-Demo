@@ -27,17 +27,11 @@ namespace MOBA.Skills
     public class SkillComponent : MonoBehaviour
     {
         [Header("技能配置（优先由 EntityBase 从 EntityStatsData 注入；此处为 Inspector 兜底）")]
-        [Tooltip("Q 槽位技能配置。")]
-        [SerializeField] private SkillData skillQ;
-
-        [Tooltip("W 槽位技能配置。")]
-        [SerializeField] private SkillData skillW;
-
-        [Tooltip("E 槽位技能配置（V1 预留，留空即可）。")]
-        [SerializeField] private SkillData skillE;
-
-        [Tooltip("R 槽位技能配置（V1 预留，留空即可）。")]
-        [SerializeField] private SkillData skillR;
+        [Tooltip("四个槽位的技能配置，下标 = (int)SkillSlot（0=Q / 1=W / 2=E / 3=R）。\n" +
+                 "用数组而不是四个独立字段：槽位数量与 SkillSlot 的显式编号强绑定，" +
+                 "数组下标天然表达这层关系，日后新增槽位时不会出现「补了枚举却忘了补字段」的漏改。\n" +
+                 "留空（null）的槽位表示该技能未配置，TryCast 会拒绝并告警一次。")]
+        [SerializeField] private SkillData[] skillSlots = new SkillData[SlotCount];
 
         [Header("调试")]
         [Tooltip("在 Console 输出每次成功施法的技能名与消耗。")]
@@ -69,6 +63,12 @@ namespace MOBA.Skills
 
         /// <summary>是否已就"缺少 EntityBase"报过错误，防止每次施法都刷日志。</summary>
         private bool hasReportedMissingOwner;
+
+        /// <summary>
+        /// 是否已就"模板技能被实例配置挡住"告警过（每个组件只报一次）。
+        /// 见 WarnIfTemplateIgnored 的说明：它是一个"值得被看见但不应刷屏"的状态。
+        /// </summary>
+        private bool hasWarnedTemplateSkillIgnored;
 
         // ---- 延迟解析的组件引用（兼容"代码动态创建、组件挂载顺序不可控"的场景）----
         private EntityBase owner;
@@ -110,6 +110,30 @@ namespace MOBA.Skills
 
         /// <summary>当前是否正在施法前摇中（只读）。BuffComponent 解除眩晕前会检查它，避免误解前摇的锁。</summary>
         public bool IsCasting => isCasting;
+
+        /// <summary>
+        /// 最近一次【成功释放】的技能所锁定的目标（只读）；非指向性 / 自身施法为 null。
+        ///
+        /// 【为什么需要它】OnSpellReleased 的参数只有（槽位, 技能配置），而表现层要把特效放到
+        /// "被打的那个单位"身上就必须知道目标是谁。这与 HealthComponent.LastDamageSource 是同一个模式：
+        /// 把"最近一次事件的有效载荷"以只读属性暴露出来，订阅方在事件回调里读它 ——
+        /// 逻辑层不需要知道有谁在订阅，也不产生任何反向依赖（表现层只读，绝不回写）。
+        ///
+        /// 【为什么不能读 TargetingComponent.CurrentTarget 代替】那是【普攻】的目标。
+        /// 玩家完全可以右键锁定 A、把技能丢给鼠标下的 B，两者不是同一件事。
+        /// </summary>
+        public ITargetable LastCastTarget { get; private set; }
+
+        /// <summary>
+        /// 最近一次【成功释放】的技能所用的地面落点（只读）；指向性 / 自身施法时为施法者自身位置。
+        ///
+        /// 【为什么需要它（阶段九新增）】表现层要在"范围场的真实位置"播地面特效（脚下的圈）。
+        /// 非指向性技能的落点由输入层给定（鼠标位置），SkillComponent 是唯一知道它的地方；
+        /// 而 OnSpellReleased 的参数只有（槽位, 技能配置），不带落点。
+        /// 与 LastCastTarget 是同一个模式：把"最近一次事件的有效载荷"以只读属性暴露出来，
+        /// 逻辑层不需要知道有谁在订阅，也不产生任何反向依赖。
+        /// </summary>
+        public Vector3 LastCastGroundPoint { get; private set; }
 
         #region 组件解析
 
@@ -281,42 +305,194 @@ namespace MOBA.Skills
         #region 配置注入与查询
 
         /// <summary>
-        /// 注入技能配置。由 EntityBase 在 Start 阶段用 EntityStatsData 调用。
-        /// 约定（与 CombatComponent.Initialize 一致）：传入 null 时保留 Inspector 上已有的引用，
-        /// 这样"配置资产里没填技能"的旧预制体仍可靠直挂方式工作。
+        /// 注入 Q / W 两槽配置（阶段六的旧重载，保留给旧调用点）。
+        /// 语义与四参重载完全一致：**实例整体接管，模板只服务全新单位**（见四参重载的说明）。
         /// </summary>
-        /// <param name="q">Q 槽位配置，允许为 null。</param>
-        /// <param name="w">W 槽位配置，允许为 null。</param>
+        /// <param name="q">Q 槽位缺省配置，允许为 null。</param>
+        /// <param name="w">W 槽位缺省配置，允许为 null。</param>
         public void Initialize(SkillData q, SkillData w)
         {
-            if (q != null)
+            Initialize(q, w, null, null);
+        }
+
+        /// <summary>
+        /// 注入四槽技能配置（阶段八：玩家英雄扩为 Q / W / E / R 四槽）。
+        ///
+        /// 【规则：实例整体接管，模板只在"全新单位"时提供 —— 这是实机打回后修正的一条硬规则】
+        /// 只要本组件的四个槽位里**已经有任意一个**配置，就认为技能由【实例】提供
+        /// （玩家 = 英雄预制体直挂的盖伦四件套；AI = 工具按技能池抽签后的按实例注入），
+        /// 此时**模板（EntityStatsData）完全不参与**，一个槽位都不会写。
+        /// 只有四个槽位全空的全新单位，才由模板整体提供四槽。
+        ///
+        /// 【为什么必须是"整体接管"而不是"只补空" —— 实机打回的根因链】
+        /// 上一版是"传进来的非 null 就写"，于是运行期出现了**两个写入者**：
+        ///   · 工具在【编辑期】把 AI 英雄的技能池抽签结果写进实例的 skillSlots（正确的）；
+        ///   · `EntityBase.ApplyStats` 在【运行期 Start】又拿共享的 `EntityStatsData` 调本方法，
+        ///     把 10 个英雄（含 AI）的四个槽全部改写成玩家那套盖伦 QWER —— 因为 10 个英雄共用
+        ///     同一份 HeroStats 资产，而它里面配着盖伦的四件套。
+        /// 结果：编辑期的注入**确实写进了场景**（编辑器里看 Inspector 完全正确），
+        /// 却在运行时被静默覆盖 —— 工具侧的任何"读回校验"都查不出这种错，因为它在 Start 才发生。
+        ///
+        /// 【为什么不能退一步改成"只补空槽"】那样虽然保住了已填的槽位，却会给 AI 英雄**空着的槽位**
+        /// 补上玩家专属技能：只要技能池抽到的技能少于 4 个（或场景里的实例是上一版工具写的、
+        /// E / R 还是空的），AI 立刻又会长出盖伦的大风车与大宝剑。"任意一槽非空即整体接管"
+        /// 把这条缝彻底封死：**AI 英雄的技能槽永远只可能来自技能池注入。**
+        /// </summary>
+        /// <param name="q">Q 槽位模板配置，允许为 null。</param>
+        /// <param name="w">W 槽位模板配置，允许为 null。</param>
+        /// <param name="e">E 槽位模板配置，允许为 null。</param>
+        /// <param name="r">R 槽位模板配置，允许为 null。</param>
+        public void Initialize(SkillData q, SkillData w, SkillData e, SkillData r)
+        {
+            if (HasInstanceSkillData())
             {
-                skillQ = q;
+                // 实例已接管：模板一律不写，但"模板里配了技能却被忽略"这件事要留痕（见该方法的说明）。
+                WarnIfTemplateIgnored(q, w, e, r);
+                return;
             }
 
-            if (w != null)
+            // 四个槽位全空 = 全新单位（旧预制体 / 测试用单位）：由模板整体提供。
+            SetSkillData(SkillSlot.Q, q);
+            SetSkillData(SkillSlot.W, w);
+            SetSkillData(SkillSlot.E, e);
+            SetSkillData(SkillSlot.R, r);
+        }
+
+        /// <summary>四个槽位里是否已经有任意一个配置（= 技能由实例提供）。</summary>
+        /// <returns>任意一槽非空返回 true。</returns>
+        private bool HasInstanceSkillData()
+        {
+            for (int i = 0; i < SlotCount; i++)
             {
-                skillW = w;
+                if (GetSkillData((SkillSlot)i) != null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 若模板里配了与实例不同的技能，报一次警告（每个组件只报一次）。
+        ///
+        /// 【为什么"被忽略"也必须报出来】"编辑器里配了技能、实机却不生效、Console 一片安静"
+        /// 正是本次实机打回最难排查的形态。这条警告把那个状态变成可见的：
+        /// 它说明有人把技能填回了共享属性资产，而那份值不会生效（技能已改为由 SkillComponent 承载）。
+        /// 每个组件只报一次：10 个英雄最多 10 行，不会刷屏。
+        /// </summary>
+        /// <param name="q">Q 槽位模板配置。</param>
+        /// <param name="w">W 槽位模板配置。</param>
+        /// <param name="e">E 槽位模板配置。</param>
+        /// <param name="r">R 槽位模板配置。</param>
+        private void WarnIfTemplateIgnored(SkillData q, SkillData w, SkillData e, SkillData r)
+        {
+            if (hasWarnedTemplateSkillIgnored)
+            {
+                return;
+            }
+
+            SkillData[] templateValues = { q, w, e, r };
+
+            for (int i = 0; i < templateValues.Length; i++)
+            {
+                SkillSlot slot = (SkillSlot)i;
+                SkillData template = templateValues[i];
+
+                if (template == null)
+                {
+                    continue;
+                }
+
+                SkillData instance = GetSkillData(slot);
+
+                // 模板值与实例值指向同一份资产 → 完全等价，不算"被忽略"。
+                if (ReferenceEquals(template, instance))
+                {
+                    continue;
+                }
+
+                hasWarnedTemplateSkillIgnored = true;
+
+                string instanceText = instance != null ? instance.DisplayName : "（空）";
+
+                Debug.LogWarning(
+                    $"[SkillComponent] {name} 的 {slot} 槽由实例提供（{instanceText}），" +
+                    $"EntityStatsData 里的 {template.DisplayName} 被忽略 —— 规则是【实例整体接管，模板只服务全新单位】。\n" +
+                    "  · 正常情况：AI 英雄的技能来自技能池按实例注入，玩家英雄来自预制体直挂，两者都不该被共享模板覆盖。\n" +
+                    "  · 若你确实想通过 EntityStatsData 改技能：那四个字段已不再承载技能（一键组装会清空它们并给出说明），" +
+                    "请直接改 Skills/ 下的技能资产，或按实例注入。（同一组件只提示一次）", this);
+                return;
             }
         }
 
         /// <summary>
+        /// 写入单个槽位的配置（传 null 表示"不改动该槽位"）。
+        ///
+        /// 【为什么需要它】AI 英雄的技能是【按实例】注入的（9 个 AI 英雄的技能互不相同，
+        /// 共享的 EntityStatsData 无法表达），注入方拿到的是一个个具体的槽位与资产，
+        /// 走这个入口比"拼一个四元素数组再整体覆盖"更不容易误伤其它槽位。
+        ///
+        /// 【它是低层写入器，不做任何优先级判断】"实例整体接管"那条规则在
+        /// <see cref="HasInstanceSkillData"/> 与 <see cref="Initialize(SkillData, SkillData, SkillData, SkillData)"/>
+        /// 里；本方法"写了就是写了"，
+        /// 因为它服务的是"按实例注入"这条最具体的通道。
+        /// </summary>
+        /// <param name="slot">目标槽位。</param>
+        /// <param name="data">技能配置，允许为 null（表示不改动）。</param>
+        /// <returns>确实写入了返回 true。</returns>
+        public bool SetSkillData(SkillSlot slot, SkillData data)
+        {
+            if (data == null)
+            {
+                return false;
+            }
+
+            int index = (int)slot;
+            if (index < 0 || index >= SlotCount)
+            {
+                return false;
+            }
+
+            // 数组可能因为序列化数据比 SlotCount 短而越界（例如手工把数组长度改小了），
+            // 这里补长而不是抛 IndexOutOfRange —— 装配错误应该在编辑器里被发现，
+            // 而不是让运行时的每一次施法都炸掉。
+            if (skillSlots == null || skillSlots.Length != SlotCount)
+            {
+                SkillData[] resized = new SkillData[SlotCount];
+
+                if (skillSlots != null)
+                {
+                    int copyCount = Mathf.Min(skillSlots.Length, SlotCount);
+                    for (int i = 0; i < copyCount; i++)
+                    {
+                        resized[i] = skillSlots[i];
+                    }
+                }
+
+                skillSlots = resized;
+            }
+
+            skillSlots[index] = data;
+            return true;
+        }
+
+        /// <summary>
         /// 取指定槽位的技能配置；未配置返回 null。
-        /// 公开出来是给输入层（PlayerSkillController）用的——它需要先知道施法类型，
-        /// 才能决定"这次按键该拾取敌方单位还是地面落点"。
+        /// 公开出来是给输入层（PlayerSkillController / HeroAIController）用的——
+        /// 它们需要先知道施法类型，才能决定"这次该拾取敌方单位、友方单位还是地面落点"。
         /// </summary>
         /// <param name="slot">技能槽位。</param>
         /// <returns>技能配置；未配置返回 null。</returns>
         public SkillData GetSkillData(SkillSlot slot)
         {
-            switch (slot)
+            int index = (int)slot;
+            if (skillSlots == null || index < 0 || index >= skillSlots.Length)
             {
-                case SkillSlot.Q: return skillQ;
-                case SkillSlot.W: return skillW;
-                case SkillSlot.E: return skillE;
-                case SkillSlot.R: return skillR;
-                default: return null;
+                return null;
             }
+
+            return skillSlots[index];
         }
 
         /// <summary>
@@ -410,6 +586,16 @@ namespace MOBA.Skills
             {
                 // 眩晕中不能施法。状态本身是正常的，因此只写进 failReason，不额外打日志（否则会刷屏）。
                 failReason = "眩晕中无法施法";
+                return false;
+            }
+
+            // ---- ①b 沉默（阶段八新增）----
+            // 沉默是"禁止施法"的唯一实现处：它不像眩晕那样去抢移动/攻击锁，
+            // 因此这里就是它全部的效力所在（见 BuffType.Silence 的说明）。
+            // 位置放在眩晕之后、前摇之前：沉默与眩晕是两种独立状态，同时存在时先报更"重"的那一个。
+            if (resolvedBuff != null && resolvedBuff.IsSilenced)
+            {
+                failReason = "被沉默，无法施法";
                 return false;
             }
 
@@ -518,12 +704,25 @@ namespace MOBA.Skills
             aimPoint = groundPoint;
             failReason = null;
 
+            // ---- 自身施法：既不需要目标也不需要落点 ----
+            // 直接返回 true 并把判定点设为自身位置。三条语义都在这里一次性说清：
+            //   ① 没有"目标合法性"这回事（自己永远合法）；
+            //   ② 没有"距离太远"这回事（施法者到自己恒为 0 米）——
+            //      若沿用下面的距离校验，策划一旦把 castRange 填小就会得到一个永远放不出来的技能；
+            //   ③ 判定点取自身位置，日志与范围场的中心都以此为准。
+            if (data.CastType == SkillCastType.Self)
+            {
+                aimPoint = transform.position;
+                return true;
+            }
+
             if (data.CastType == SkillCastType.UnitTarget)
             {
-                if (!TryValidateTarget(target, out failReason))
+                if (!TryValidateTarget(target, data, out failReason))
                 {
-                    // 目标非法（友方 / 已死亡 / 不可选中 / 已被销毁）——由输入层的拾取规则保证大多数情况下不会走到这里，
-                    // 但技能入口必须自己再拦一次：目标可能在"按下按键"与"技能组件收到指令"之间失效。
+                    // 目标非法（友方 / 敌方 / 已死亡 / 不可选中 / 已被销毁）——由输入层的拾取规则保证
+                    // 大多数情况下不会走到这里，但技能入口必须自己再拦一次：
+                    // 目标可能在"按下按键"与"技能组件收到指令"之间失效。
                     return false;
                 }
 
@@ -561,14 +760,25 @@ namespace MOBA.Skills
         /// 之所以要先单独做一次存活检查再调 IsValidTarget：接口引用在 GameObject 被销毁后不会变成 null，
         /// 直接访问 IsValidTarget 虽然内部有兜底，但那样就只能得到"已失效"这个笼统结论，
         /// 而"目标已被销毁"和"目标已死亡"对排查来说是完全不同的两件事。
+        ///
+        /// 【阶段八：阵营规则由 SkillData.TargetsAlly 决定】伤害/控制类只认敌方，治疗/护盾类只认友方。
+        /// 这条规则必须由数据驱动而不是由本类猜：同一个 UnitTarget 形态既可能是斩杀也可能是治疗，
+        /// 只有技能配置自己知道它想要谁。敌我判定仍然复用 TargetingComponent.IsEnemy（唯一入口），
+        /// 因此"友方"= 非中立且与施法者同阵营，与"敌方"严格互补。
         /// </summary>
-        private bool TryValidateTarget(ITargetable target, out string failReason)
+        /// <param name="target">待校验目标。</param>
+        /// <param name="data">技能配置（决定目标该是敌方还是友方）。</param>
+        /// <param name="failReason">输出：失败原因；通过时为 null。</param>
+        /// <returns>可用于施法返回 true。</returns>
+        private bool TryValidateTarget(ITargetable target, SkillData data, out string failReason)
         {
             failReason = null;
 
             if (target == null)
             {
-                failReason = "缺少目标（指向性技能需要锁定一个敌方单位）";
+                failReason = data.TargetsAlly
+                    ? "缺少目标（该技能需要锁定一个友方单位）"
+                    : "缺少目标（指向性技能需要锁定一个敌方单位）";
                 return false;
             }
 
@@ -588,6 +798,21 @@ namespace MOBA.Skills
             bool isEnemy = resolvedTargeting != null
                 ? resolvedTargeting.IsEnemy(target)
                 : IsEnemyFallback(target);
+
+            // 友方判定 = "非中立 且 非敌方"。刻意用 isEnemy 取反而不是再写一遍阵营比较：
+            // 中立单位的 isEnemy 已经是 false，若直接取反就会把中立单位当成友方放行。
+            bool isAlly = target.Team != TeamType.Neutral && !isEnemy;
+
+            if (data.TargetsAlly)
+            {
+                if (!isAlly)
+                {
+                    failReason = $"目标非法（{target.Team} 阵营，不是友方单位）";
+                    return false;
+                }
+
+                return true;
+            }
 
             if (!isEnemy)
             {
@@ -685,11 +910,41 @@ namespace MOBA.Skills
                 case SkillCastType.GroundPoint:
                     released = AreaEffectZone.Spawn(Owner, data, groundPoint) != null;
                     break;
+
+                case SkillCastType.Self:
+                    // 自身施法有两条落地路径，由【显式开关 spawnZoneAtSelf】分派：
+                    //   · true  → 在施法者脚下生成一个范围场（E 审判；followCaster 时每帧跟随）；
+                    //   · false → 直接把主效果作用于自己（Q 强化普攻 / W 护盾 / 疾行术）。
+                    //
+                    // 【为什么不用「areaDuration > 0」来分派 —— 这是实机踩出来的】
+                    // areaDuration 的默认值是 4（地面 AOE 需要它），因此任何没有显式清零的 Self 技能
+                    // 都会被误判成范围场：按 Q 不给自己加 buff，反而在脚下生成一个"对敌人施加
+                    // 强化普攻"的怪圈，而且不报任何错。施法意图必须由显式字段表达，
+                    // 不能从另一个字段的数值默认值反推。
+                    if (data.SpawnZoneAtSelf)
+                    {
+                        released = AreaEffectZone.Spawn(Owner, data, transform.position) != null;
+                    }
+                    else
+                    {
+                        // 目标就是施法者自己：EntityBase 实现了 ITargetable，
+                        // 而 Apply 内部的 IsUsable 只要求"存活 + 可选中"，不会因为"目标是友方"而拒绝。
+                        released = SkillEffectResolver.Apply(Owner, Owner, data);
+                    }
+
+                    break;
             }
 
             // 只有真的生成了效果载体才广播释放事件：表现层据此播特效，因此"没飞出去却播了特效"不会发生。
             if (released)
             {
+                // 记录本次锁定的目标供表现层读取（见 LastCastTarget 的说明）。
+                // 必须在广播【之前】写入：订阅方是在事件回调里同步读它的。
+                LastCastTarget = target;
+
+                // 落点同理（见 LastCastGroundPoint）：自身施法取自身位置，其余取输入层给定的落点。
+                LastCastGroundPoint = data.CastType == SkillCastType.Self ? transform.position : groundPoint;
+
                 OnSpellReleased?.Invoke(slot, data);
             }
         }
@@ -736,9 +991,24 @@ namespace MOBA.Skills
         /// 前摇期间锁住移动与攻击。
         /// 必要性：不锁的话，玩家可以在 0.25 秒前摇里把英雄点走，弹道却从新位置飞出——
         /// 视觉与逻辑都对不上；同时"施法时不能动"也是 MOBA 的基本手感。
+        ///
+        /// 【阶段八：前摇为 0 的技能【不】上锁 —— 这是实机手感的一个硬要求】
+        /// 上锁的第一步是 Movement.Stop()，它会清掉当前路径；而随后的解锁（同一帧内发生，
+        /// 因为 castEndTime &lt;= Time.time 会立刻 Release）**并不会恢复那条路径**。
+        /// 于是"边走边按 Q"会得到一个非常突兀的结果：英雄立刻停在原地不再前进，
+        /// 玩家必须重新点一下地板才会继续走 —— 瞬发技能反而成了"刹车"。
+        /// 对 AI 英雄更糟：FSM 的"已下达移动指令"标记仍是 true，它要等 1 秒的停滞检测
+        /// 才会重新下令，表现为"每放一次增益就原地卡住一秒"。
+        ///
+        /// 因此只在【真的有前摇】时才上锁：没有硬直，就没有需要保护的时间窗。
         /// </summary>
         private void LockControlsForCast()
         {
+            if (castingData == null || castingData.CastTime <= 0f)
+            {
+                return;
+            }
+
             MovementComponent resolvedMovement = Movement;
             if (resolvedMovement != null)
             {

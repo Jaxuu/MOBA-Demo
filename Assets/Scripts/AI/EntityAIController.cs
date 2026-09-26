@@ -46,16 +46,27 @@ namespace MOBA.AI
         [Min(0f)]
         [SerializeField] private float chaseRepathDistance = 0.25f;
 
-        [Tooltip("牵引极限系数：与「追击起点锚点」的距离超过「索敌半径 × 该系数」时，强制放弃目标返回兵线。\n" +
+        [Tooltip("【防脱线】追击发起半径（米）：只有敌人处在这个距离内，才允许【从推进/待机状态】脱离兵线去追击。\n" +
+                 "它和索敌半径的分工是本项目最容易混淆的一点：\n" +
+                 "  · 索敌半径（TargetingComponent.DetectionRadius）= 「看得见多远」，决定 AI 有没有反应，可以很大；\n" +
+                 "  · 本值 = 「值不值得离开兵线去打」，决定会不会真的脱线，必须很小（略大于攻击距离即可）。\n" +
+                 "为什么必须分开：两者共用一个值时，地图一拉长就得把索敌半径放大，而放大后\n" +
+                 "「放弃追击距离」与「牵引极限」会跟着同步放大（它们以本值为基准），\n" +
+                 "于是单位被勾走几十米再走回来，全队反复进出兵线并挤成一团。\n" +
+                 "取 0 表示退化为「与索敌半径相同」（旧行为，仅用于对照排查）。")]
+        [Min(0f)]
+        [SerializeField] private float chaseEngageRange = 8f;
+
+        [Tooltip("牵引极限系数：与「追击起点锚点」的距离超过「追击发起半径 × 该系数」时，强制放弃目标返回兵线。\n" +
                  "用途：拦住「目标一直贴着本单位跑、把本单位牵着离开兵线」的情形——\n" +
                  "这种场景下与目标的距离始终很小，只靠 chaseAbandonRangeFactor 是拦不住的。\n" +
-                 "必须 ≥ 1（否则小于索敌半径，正常追击都会被判定为出界）。")]
+                 "必须 ≥ 1（否则小于追击发起半径，正常追击都会被判定为出界）。")]
         [Min(1f)]
         [SerializeField] private float chaseLeashRangeFactor = 2f;
 
-        [Tooltip("感知节流间隔（秒）：FindNearestEnemy 内部是一次 Physics.OverlapSphere（每次分配一个数组），\n" +
-                 "按计划书第 6 条「AI 感知采用固定周期检测」在此统一节流，避免每个单位每帧做物理范围查询。\n" +
-                 "填 0 表示每帧检测（仅调试用）。")]
+        [Tooltip("感知节流间隔（秒）：FindNearestEnemy 内部是一次物理范围查询（阶段八已换成 NonAlloc，" +
+                 "稳态零分配，但仍是 O(候选数) 的遍历），\n按计划书第 6 条「AI 感知采用固定周期检测」" +
+                 "在此统一节流，避免每个单位每帧做范围查询。\n填 0 表示每帧检测（仅调试用）。")]
         [Min(0f)]
         [SerializeField] private float detectionInterval = 0.25f;
 
@@ -68,6 +79,14 @@ namespace MOBA.AI
         [Min(0.1f)]
         [SerializeField] private float stagnationDuration = 1f;
 
+        [Tooltip("【防卡死】同一个路径点被判定卡住多少次之后【跳过它】继续推进（阶段八新增）。\n" +
+                 "为什么必须跳过而不是无限重试：兵线节点可能被别的单位长期占住（5v5 后同屏 40+ 单位，" +
+                 "桥面收窄到 14 米，塔洞两侧只有 5.2 米通行带），此时重下指令毫无作用，\n" +
+                 "单位会永久停在那一站 —— 这正是实机日志里「[MoveState] 连续 1.0 秒几乎未移动」反复出现的原因。\n" +
+                 "取 0 表示关闭该机制（退化为无限重试，仅用于对照排查）。")]
+        [Min(0)]
+        [SerializeField] private int waypointSkipAfterStagnationCycles = 3;
+
         [Header("尸体清理（白盒期）")]
         [Tooltip("单位死亡后尸体在场景里停留多久（秒），到期销毁整个 GameObject。\n" +
                  "为什么必须销毁：本 Demo 的小兵由 MinionSpawner 持续生成，一局会产生成百上千个；\n" +
@@ -79,6 +98,13 @@ namespace MOBA.AI
         [Tooltip("在 Console 输出「尸体已销毁」的记录。一局会产生成百上千个小兵，" +
                  "排查尸体是否真的被清理时打开，平时建议关闭以免刷屏。")]
         [SerializeField] private bool logDeathCleanup = false;
+
+        [Tooltip("死亡后是否销毁整个 GameObject（阶段八新增）。\n" +
+                 "小兵：true —— 一局会产生成百上千个，尸体只停逻辑不销毁会让内存与层级双双膨胀。\n" +
+                 "英雄：false —— 英雄死亡后要走「倒计时 → 复活」链路，把物体销毁了就永远复活不回来。\n" +
+                 "关闭销毁只是保留物体与组件，肉身仍会被立刻隐藏（HeroController.HandleDied 负责隐藏，" +
+                 "Revive 负责恢复），因此画面上与销毁没有区别。")]
+        [SerializeField] private bool destroyCorpseOnDeath = true;
 
         /// <summary>FSM 核心引擎，在 Awake 中实例化（纯 C# 类，不需要挂在 GameObject 上）。</summary>
         private StateMachine stateMachine;
@@ -197,11 +223,40 @@ namespace MOBA.AI
             }
         }
 
+        /// <summary>
+        /// 追击发起半径（米）：只有敌人在这个距离内，才允许从推进 / 待机状态脱离兵线去追击。
+        ///
+        /// 【为什么不直接用索敌半径】见 chaseEngageRange 字段的说明：索敌半径是"看得见"，
+        /// 本值是"值不值得离开兵线"。两者共用一个值会把"视野"和"脱线范围"绑死，
+        /// 于是地图一长，单位就会被勾走几十米。取 0 时退化为索敌半径（保留旧行为的可对照性）。
+        /// </summary>
+        public float ChaseEngageDistance
+        {
+            get
+            {
+                if (chaseEngageRange > 0f)
+                {
+                    return chaseEngageRange;
+                }
+
+                return DetectionRadius;
+            }
+        }
+
         /// <summary>放弃追击的距离系数（只读），供调试视图复算最大追击半径，保证可视化与判定用同一份参数。</summary>
         public float ChaseAbandonRangeFactor => Mathf.Max(1f, chaseAbandonRangeFactor);
 
-        /// <summary>放弃追击的距离阈值（滞回上界）。同样用 Mathf.Max 兜住"系数必须 ≥ 1"这一不变量。</summary>
-        public float ChaseAbandonDistance => DetectionRadius * ChaseAbandonRangeFactor;
+        /// <summary>
+        /// 放弃追击的距离阈值（滞回上界）：与目标的距离超过它即放弃目标、返回路线。
+        /// 用 Mathf.Max 兜住"系数必须 ≥ 1"这一不变量 —— 系数一旦被改成小于 1，
+        /// 退出阈值就会小于进入阈值（ChaseEngageDistance），滞回死区消失、震荡立刻回来。
+        ///
+        /// 【阶段八修复：基准从"索敌半径"换成"追击发起半径"】原来的写法是
+        /// `DetectionRadius × 1.5`，于是"看见 24 米就追、追到 36 米才放" —— 单位会整段脱线。
+        /// 换成以追击发起半径（7 米）为基准后，退出门槛变成 10.5 米，滞回关系（1.5 &gt; 1）一字未改，
+        /// 但"脱线多远"回到了兵线尺度。
+        /// </summary>
+        public float ChaseAbandonDistance => ChaseEngageDistance * ChaseAbandonRangeFactor;
 
         /// <summary>牵引极限系数（只读），供调试视图复算牵引极限，保证可视化与判定用同一份参数。</summary>
         public float ChaseLeashRangeFactor => Mathf.Max(1f, chaseLeashRangeFactor);
@@ -210,8 +265,9 @@ namespace MOBA.AI
         /// 牵引极限距离：与追击起点锚点的距离超过它即强制放弃目标、返回兵线。
         /// 与 ChaseAbandonDistance 的区别：后者量的是"与目标的距离"（追不上就放弃），
         /// 前者量的是"离开追击起点的距离"（被牵着走太远就放弃）。两者是互相补充的两个闸门。
+        /// 基准同样从索敌半径换成了追击发起半径（阶段八修复），理由见 ChaseAbandonDistance。
         /// </summary>
-        public float ChaseLeashDistance => DetectionRadius * ChaseLeashRangeFactor;
+        public float ChaseLeashDistance => ChaseEngageDistance * ChaseLeashRangeFactor;
 
         /// <summary>
         /// 当前是否已被牵引出界（详见 <see cref="ChaseState.IsBeyondChaseLeash"/>）。
@@ -249,7 +305,8 @@ namespace MOBA.AI
         /// <summary>
         /// 节流后的敌情感知入口：各状态统一调用本方法，而不是自己去调 TargetingComponent.FindNearestEnemy。
         ///
-        /// 为什么必须统一走这里：FindNearestEnemy 内部是一次 Physics.OverlapSphere（每次分配一个数组），
+        /// 为什么必须统一走这里：FindNearestEnemy 内部是一次物理范围查询（阶段八已换成
+        /// Physics.OverlapSphereNonAlloc，稳态零分配，但仍是 O(候选数) 的遍历与比较），
         /// 计划书第 6 条明确要求「AI 感知采用固定周期检测，而非所有单位每帧执行物理范围查询」。
         /// 把节流做在控制器上，状态就只是「读取结果」，不会各自实现一份间隔逻辑而互相不一致。
         ///
@@ -341,6 +398,12 @@ namespace MOBA.AI
 
         /// <summary>卡死判定的速度平方阈值。</summary>
         public float StagnationVelocitySqrThreshold => Mathf.Max(0f, stagnationVelocitySqrThreshold);
+
+        /// <summary>
+        /// 同一个路径点被判定卡住多少次之后跳过它。
+        /// 取 0 表示关闭该机制（无限重试），供对照排查。
+        /// </summary>
+        public int WaypointSkipAfterStagnationCycles => Mathf.Max(0, waypointSkipAfterStagnationCycles);
 
         /// <summary>
         /// 判断单位这一刻是否「几乎没在动」。
@@ -559,14 +622,22 @@ namespace MOBA.AI
         }
 
         /// <summary>
-        /// 请求切换到追击状态。由 IdleState / MoveState 在"发现敌人"时调用。
+        /// 请求切换到追击状态。
         /// 调用前必须已把目标写入 TargetingComponent，否则追击状态读不到目标。
         ///
         /// 【防震荡闸门】不具备追击能力时直接拒绝（见 CanChase）：
         /// 放行只会让 ChaseState 立刻退回推进状态，与"发现敌人就转追击"构成每帧互切。
         /// </summary>
+        /// <param name="requireEngagementRange">
+        /// 是否要求目标处在"追击发起半径"内。
+        ///   · true（默认）—— MoveState / IdleState 使用：它们代表"单位正在沿兵线推进"，
+        ///     此时"要不要为了这个敌人脱线"必须过闸门，否则单位会被远处的敌人勾走整段脱线。
+        ///   · false —— AttackState 使用：单位已经在交战中，目标拉开到滞回上界之外时请求继续追击，
+        ///     这时问"值不值得脱线"是错的（它本来就已经脱线了），再问一次只会让它在滞回上界外卡死：
+        ///     既打不到（超出攻击距离）、又追不了（被闸门拒绝），永远停在 AttackState 里空转。
+        /// </param>
         /// <returns>确实发生了状态切换返回 true；被拒绝返回 false。</returns>
-        public bool TryEnterChaseState()
+        public bool TryEnterChaseState(bool requireEngagementRange = true)
         {
             if (!CanChase)
             {
@@ -585,7 +656,62 @@ namespace MOBA.AI
                 return false;
             }
 
+            // 【脱线闸门】目标不在"追击发起半径"内 → 不追，继续沿兵线推进。
+            //
+            // 这是阶段八实机修复的核心：MoveState / IdleState 用的感知入口（TryDetectEnemy）
+            // 是按【索敌半径】过滤的（小兵 24 米、英雄 20 米），而索敌半径必须够大
+            // （地图 120 米长，半径太小 AI 会"走到贴脸才发现敌人"）。
+            // 若直接拿感知结果去发起追击，单位就会为了 20 多米外的敌人整段脱线 ——
+            // 实机表现是"全队反复进出兵线、被牵引出界 42 次、在兵线节点上挤成一团"。
+            // 把闸门放在这里（而不是去改索敌半径）的好处是：视野保持很大，脱线范围却很小，
+            // 两者各管各的，不需要再动任何系数。
+            if (requireEngagementRange && !IsTargetWithinEngagementRange())
+            {
+                return false;
+            }
+
             return SwitchState(chaseState);
+        }
+
+        /// <summary>
+        /// 当前锁定的目标是否处在"追击发起半径"内。
+        ///
+        /// 读的是 <see cref="TargetingComponent.CurrentTarget"/>（而不是把目标作为参数传进来）：
+        /// 调用本方法的两个状态（MoveState / IdleState）都遵循"先 SetTarget、再请求切换"的顺序，
+        /// 因此这里读到的必然就是它们刚锁定的那个目标。控制器不再多一个"待追击目标"字段，
+        /// 目标的唯一存放处仍然只有索敌组件一处（与"攻击指令唯一存放处"同一约定）。
+        ///
+        /// 没有锁定目标、目标已被销毁、或 Transform 丢失时一律返回 false —— 没有目标就不该追击。
+        /// </summary>
+        private bool IsTargetWithinEngagementRange()
+        {
+            EntityBase owner = entity;
+            if (owner == null)
+            {
+                return false;
+            }
+
+            TargetingComponent targeting = owner.Targeting;
+            if (targeting == null)
+            {
+                return false;
+            }
+
+            ITargetable current = targeting.CurrentTarget;
+            if (current == null)
+            {
+                return false;
+            }
+
+            Transform targetTransform = current.TargetTransform;
+            if (targetTransform == null)
+            {
+                return false;
+            }
+
+            // 比较平方距离，省掉一次开方。与 TargetingComponent.FindNearestEnemy 同一写法。
+            float engageDistance = ChaseEngageDistance;
+            return (targetTransform.position - transform.position).sqrMagnitude <= engageDistance * engageDistance;
         }
 
         /// <summary>请求切换到攻击状态。由 ChaseState 在"进入攻击距离"时调用。</summary>
@@ -684,15 +810,23 @@ namespace MOBA.AI
         }
 
         /// <summary>
-        /// 尸体清理（白盒期）：先让尸体立刻从画面上消失，再安排一次延时销毁。
+        /// 尸体清理：安排一次延时销毁（尸体不再被隐藏）。
         ///
-        /// 【为什么"立刻隐藏"与"延时销毁"要分两步】
-        /// 隐藏是即时的视觉反馈（战场上不该立着一排尸体）；而销毁需要一个短暂的停留期：
-        /// 死亡瞬间的伤害飘字与击杀播报都还在播，飘字的锚点就在这个单位身上，
-        /// 若当帧就把物体删掉，表现层的上下文会突然消失。因此先"看起来死了"，再"真的消失"。
+        /// 【阶段九变更：删掉了"立刻隐藏肉身"这一步】
+        /// 原先第一步是 <c>EntityVisuals.SetRenderersEnabled(gameObject, false)</c>，让尸体立刻从画面上消失。
+        /// 那是"没有死亡动画"时期的权宜手段；接入真实模型与 Die 动画后，死亡表现必须由表现层接管，
+        /// 逻辑层抢先隐藏渲染器会让死亡动画一帧都播不出来（动画在跑，但 Renderer 是关的）。
+        /// 现在尸体保持可见，由动画放倒，再在停留期结束后销毁整个物体。
+        ///
+        /// 【为什么还需要"延时销毁"这一步】死亡瞬间的伤害飘字与击杀播报都还在播，
+        /// 飘字的锚点就在这个单位身上，若当帧就把物体删掉，表现层的上下文会突然消失。
+        /// 因此保留一个短暂的停留期（corpseLingerSeconds）。
         ///
         /// 【为什么不用 Destroy(gameObject, delay) 这个重载】它无法被查询、也无法取消，
         /// 排查时看不到"到底有没有安排销毁"。用协程可以显式记下句柄，便于防重入与调试。
+        ///
+        /// 【阶段八：英雄不销毁】destroyCorpseOnDeath 为 false 时（英雄），本方法什么都不做 ——
+        /// 英雄的物体要靠它自己复活。
         /// </summary>
         private void HandleCorpseCleanup()
         {
@@ -701,16 +835,59 @@ namespace MOBA.AI
                 return;
             }
 
-            // 1. 立刻隐藏肉身（含全部子节点）。与英雄走同一个工具方法，保证两边的口径一致。
-            EntityVisuals.SetRenderersEnabled(entity.gameObject, false);
+            // 不需要销毁的单位到此为止（英雄要靠这个物体复活）。
+            if (!destroyCorpseOnDeath)
+            {
+                return;
+            }
 
-            // 2. 安排延时销毁。
+            // 安排延时销毁。
             //    已有句柄说明已经安排过：死亡事件本身只广播一次，但"初始化兜底"与"事件回调"两条路径
             //    都指向这里，这个判断让它们天然幂等。
             if (corpseCleanupRoutine == null)
             {
                 corpseCleanupRoutine = StartCoroutine(DestroyCorpseAfterDelay());
             }
+        }
+
+        /// <summary>
+        /// 复活后的 AI 复位（阶段八新增，供 MatchController 在 HeroController.Revive 之后调用）。
+        ///
+        /// 【为什么必须有这个方法】DeadState 被刻意设计成"单向终态"（见该类的 Exit 注释），
+        /// 状态机进入 DeadState 之后没有任何出口。英雄复活时把生命、碰撞体、寻路代理都恢复了，
+        /// 但 FSM 仍停在 DeadState —— 症状是"英雄复活了、看得见、也能被点中，但永远站着不动、不还手"，
+        /// 而且 Console 一片安静（DeadState.Tick 是空实现）。
+        ///
+        /// 复位内容：
+        ///   1. 清掉感知缓存与节流计时器 —— 死亡前的缓存可能指向一个早已失效的目标，
+        ///      不清理会让复活后的第一帧读到脏数据；
+        ///   2. 把状态机切回推进状态 —— MoveState.Enter 会清掉"已下达移动指令"标记，
+        ///      下一帧就会重新朝当前路径点下令（currentWaypointIndex 是跨状态保留的，因此从断点继续）。
+        ///
+        /// 【为什么不做成"DeadState 可退出"】那会动摇"死亡是单向终态"这条全项目共识，
+        /// 而死亡收尾（停寻路 / 禁碰撞 / 禁代理）与复活收尾（恢复寻路 / 恢复碰撞 / 恢复代理）
+        /// 本来就是一对必须显式配对的操作。用一个显式的复位入口，比让终态变得可逆更容易推理。
+        /// </summary>
+        public void ReviveAI()
+        {
+            if (!hasInitialized)
+            {
+                // 未初始化的单位没有状态机可复位（例如初始化失败被禁用的对象），静默返回。
+                return;
+            }
+
+            cachedDetectionResult = null;
+            detectionTimer = 0f;
+
+            // 尸体销毁协程在英雄路径上不会被启动（destroyCorpseOnDeath 为 false），
+            // 这里仍然显式清一次句柄：万一配置被改成 true 又复活，不会留下一个已完成的句柄。
+            corpseCleanupRoutine = null;
+
+            // 从 DeadState 切回推进状态。SwitchState 在"当前就是目标状态"时返回 false，
+            // 因此对"复活时其实没死"的误调用也是安全的（不会重复触发 MoveState.Enter 的副作用）。
+            SwitchState(moveState);
+
+            Debug.Log($"[EntityAIController] {name} 复活后 AI 已复位，状态机切回 {moveState.GetType().Name}。", this);
         }
 
         /// <summary>

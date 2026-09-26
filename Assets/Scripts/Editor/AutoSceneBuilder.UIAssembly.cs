@@ -64,6 +64,17 @@ namespace MOBA.Editor
         private const string ManaTextName = "ManaText";
         private const string SkillSlotQName = "SkillSlot_Q";
         private const string SkillSlotWName = "SkillSlot_W";
+        private const string SkillSlotEName = "SkillSlot_E";
+        private const string SkillSlotRName = "SkillSlot_R";
+
+        /// <summary>技能槽的边长（像素）。</summary>
+        private const float SkillSlotSize = 56f;
+
+        /// <summary>相邻技能槽的间距（像素）。Q/W/E/R 四个槽共占 4 × 56 + 3 × 8 = 248 像素。</summary>
+        private const float SkillSlotSpacing = 8f;
+
+        /// <summary>第一个技能槽相对 HUD 左下角的偏移（像素）。与血条 / 蓝条的左边界对齐。</summary>
+        private static readonly Vector2 SkillSlotOrigin = new Vector2(104f, 8f);
         private const string SlotBackgroundName = "Background";
         private const string SlotIconName = "Icon";
         private const string SlotCooldownOverlayName = "CooldownOverlay";
@@ -89,6 +100,12 @@ namespace MOBA.Editor
 
         /// <summary>占位美术资产所在目录（README 目录规范里的 Art/Textures 之外单开 Art/UI，避免与地面贴图混放）。</summary>
         private const string UIArtFolder = "Assets/Art/UI";
+
+        /// <summary>
+        /// 技能正式图标的目录（阶段九新增）。约定：<c>HeroSkillQ.png</c> ↔ <c>HeroSkillQ.asset</c>，
+        /// 文件名与技能槽一一对应，因此工具可以按槽位名拼路径，不需要一张映射表。
+        /// </summary>
+        private const string SkillIconFolder = "Assets/Art/Textures/UI";
 
         /// <summary>占位白图路径。所有纯色 Image 与 CD 径向遮罩都用它，不引入任何外部美术资源。</summary>
         private const string UIWhiteSpritePath = UIArtFolder + "/UIWhite.png";
@@ -139,19 +156,40 @@ namespace MOBA.Editor
         private static readonly Color RespawnTitleColor = new Color(1f, 0.35f, 0.3f, 1f);
         private static readonly Color RespawnCountdownColor = new Color(1f, 0.92f, 0.6f, 1f);
 
-        /// <summary>血条预生成数量（同屏 30 单位的目标下留余量）。</summary>
-        private const int HealthBarPrewarmCount = 24;
+        /// <summary>
+        /// 血条预生成数量。
+        /// 【阶段八由 24 提到 48】PrefabPool 的契约是"池空返回 null + 告警一次，绝不 Instantiate"，
+        /// 即容量就是硬上限。5v5 后同屏单位量级为 10 英雄 + 6 塔 + 2 基地 + 双兵线（每波 3 个 × 2 方），
+        /// 24 条会稳定溢出，症状是"一部分单位头顶没有血条"且只报一条 Warning。
+        /// </summary>
+        private const int HealthBarPrewarmCount = 48;
 
-        /// <summary>小地图标记的预生成数量（同屏单位 + 建筑的数量级）。</summary>
-        private const int MinimapMarkerPrewarmCount = 32;
+        /// <summary>小地图标记的预生成数量。与血条同源（凡带生命组件的实体都会上图），因此同步提到 64。</summary>
+        private const int MinimapMarkerPrewarmCount = 64;
 
-        /// <summary>小地图的边长（像素）。正方形，与战场俯视图的等比例映射一致。</summary>
-        private static readonly Vector2 MinimapSize = new Vector2(220f, 220f);
+        /// <summary>
+        /// 小地图面板的基准宽度（像素）。
+        ///
+        /// 【阶段八：220 → 300】桥长从 78 米扩到 120 米后，若宽度不变，单位标记会挤在一起
+        /// （英雄标记 13px 在 220px 上代表 7 米的跨度，5v5 团战时完全糊成一团）。
+        /// 高度仍按战场长宽比换算，见 ResolveMinimapSize。
+        /// </summary>
+        private static readonly Vector2 MinimapSize = new Vector2(300f, 300f);
+
+        /// <summary>
+        /// 小地图面板的最小高度（像素）。
+        ///
+        /// 下限的作用：战场极端狭长时（长宽比很大），按比例算出的高度会小到只剩一条线，
+        /// 标记互相重叠、完全不可读。
+        /// 当前 120×40 的桥按比例得到 300 × 100 像素（比例完全正确，不会被本下限钳制）；
+        /// 保留它只是为日后进一步拉长地图时兜底。
+        /// </summary>
+        private const float MinimapMinHeight = 70f;
 
         private static readonly Color MinimapBackgroundColor = new Color(0.05f, 0.07f, 0.1f, 0.75f);
 
-        /// <summary>飘字预生成数量。</summary>
-        private const int PopupPrewarmCount = 32;
+        /// <summary>飘字预生成数量。阶段八同屏伤害事件密度上升，同步由 32 提到 48。</summary>
+        private const int PopupPrewarmCount = 48;
 
         /// <summary>播报槽位数量（固定，不池化）。</summary>
         private const int KillFeedEntryCount = 5;
@@ -392,32 +430,72 @@ namespace MOBA.Editor
         }
 
         /// <summary>
-        /// 给两个技能资产的 Icon 字段补占位图。
-        /// 沿用「只补空、不覆盖」原则：已配置的图标（正式美术）绝不被冲掉，资产 guid 也不变。
+        /// 给四个技能资产的 Icon 字段补图（阶段九扩展）。
+        ///
+        /// 【阶段九变更：从"只补 Q/W 的占位白图"扩为"四个槽位都补，且优先用正式图标"】
+        ///  · 阶段七只覆盖 Q / W 两槽（那时玩家只有两个技能），E / R 的 Icon 一直是空的
+        ///    —— 阶段八扩到四槽后，HUD 上后两个技能槽一直没有图标，只是没人注意到。
+        ///  · 现在按 `Assets/Art/Textures/UI/HeroSkill{Q,W,E,R}.png` 找正式图标（导入为 Sprite），
+        ///    找到就注入；找不到才退回占位白图。
+        ///
+        /// 【优先级规则 —— 与"只补空、不覆盖"的既有原则如何共存】
+        ///  · 正式图标存在时：无条件写入（这样"从零克隆仓库 → 一键组装"就能得到正确图标，
+        ///    满足 README §6.1「手工拖的引用不算交付」）；
+        ///  · 正式图标不存在时：沿用 `PatchObjectReferenceIfUnset`（只补空、不覆盖），
+        ///    绝不把美术手工指定的图标冲成白图。
         /// </summary>
         /// <param name="whiteSprite">占位 Sprite。</param>
         /// <param name="notes">缺口修补记录。</param>
         private static void PatchSkillIcons(Sprite whiteSprite, List<string> notes)
         {
-            if (whiteSprite == null)
+            (string skillPath, string slotLabel)[] entries =
             {
-                return;
-            }
+                (HeroSkillQAssetPath, "Q"),
+                (HeroSkillWAssetPath, "W"),
+                (HeroSkillEAssetPath, "E"),
+                (HeroSkillRAssetPath, "R"),
+            };
 
-            string[] skillPaths = { HeroSkillQAssetPath, HeroSkillWAssetPath };
-
-            for (int i = 0; i < skillPaths.Length; i++)
+            for (int i = 0; i < entries.Length; i++)
             {
-                SkillData skill = AssetDatabase.LoadAssetAtPath<SkillData>(skillPaths[i]);
+                string skillPath = entries[i].skillPath;
+                string slotLabel = entries[i].slotLabel;
+
+                SkillData skill = AssetDatabase.LoadAssetAtPath<SkillData>(skillPath);
 
                 if (skill == null)
                 {
                     continue;
                 }
 
-                if (PatchObjectReferenceIfUnset(skill, "icon", whiteSprite))
+                // 正式图标优先：约定路径与技能槽同名（HeroSkillQ.png ↔ HeroSkillQ.asset）。
+                string iconPath = SkillIconFolder + "/HeroSkill" + slotLabel + ".png";
+                Sprite formalIcon = AssetDatabase.LoadAssetAtPath<Sprite>(iconPath);
+
+                if (formalIcon != null)
                 {
-                    notes.Add($"{System.IO.Path.GetFileName(skillPaths[i])} 补写占位技能图标");
+                    // 用"值不同才写"的写入器：图标已经正确时不产生任何资产改动，
+                    // 重复执行组装不会让四个技能资产每次都变脏（幂等性要求）。
+                    SerializedObject serialized = new SerializedObject(skill);
+
+                    if (SetObjectReferenceIfDifferent(serialized, "icon", formalIcon, out bool fieldFound))
+                    {
+                        serialized.ApplyModifiedProperties();
+                        notes.Add($"{System.IO.Path.GetFileName(skillPath)} 图标 ← {iconPath}（正式图标）");
+                    }
+
+                    if (!fieldFound)
+                    {
+                        // SetObjectReferenceIfDifferent 已经报过"字段可能被改名"，这里不再重复刷屏。
+                        continue;
+                    }
+
+                    continue;
+                }
+
+                if (whiteSprite != null && PatchObjectReferenceIfUnset(skill, "icon", whiteSprite))
+                {
+                    notes.Add($"{System.IO.Path.GetFileName(skillPath)} 补写占位技能图标（{iconPath} 未导入）");
                 }
             }
         }
@@ -702,11 +780,20 @@ namespace MOBA.Editor
                 AnchorBottomLeft, AnchorBottomLeft, AnchorBottomLeft,
                 new Vector2(104f, 76f), new Vector2(396f, 16f));
 
-            // ---------- 技能槽 ----------
-            SkillSlotView qSlot = BuildSkillSlot(bottomBar.transform, SkillSlotQName, SkillSlot.Q, font,
-                new Vector2(104f, 8f));
-            SkillSlotView wSlot = BuildSkillSlot(bottomBar.transform, SkillSlotWName, SkillSlot.W, font,
-                new Vector2(168f, 8f));
+            // ---------- 技能槽（阶段八：2 槽 → 4 槽，与 Q / W / E / R 四键一一对应）----------
+            // 按 (int)SkillSlot 的顺序排布，并把它们组成数组注入给 HUD ——
+            // HUD 只按数组下标驱动，因此"槽位数量"这件事在视图侧只有一个来源。
+            SkillSlotView[] skillSlots = new SkillSlotView[4];
+
+            for (int i = 0; i < skillSlots.Length; i++)
+            {
+                SkillSlot slot = (SkillSlot)i;
+                Vector2 position = new Vector2(
+                    SkillSlotOrigin.x + i * (SkillSlotSize + SkillSlotSpacing), SkillSlotOrigin.y);
+
+                skillSlots[i] = BuildSkillSlot(
+                    bottomBar.transform, ResolveSkillSlotObjectName(slot), slot, font, position);
+            }
 
             AssignObjectReference(view, "hero", hero);
             AssignObjectReference(view, "portraitImage", portrait);
@@ -714,21 +801,37 @@ namespace MOBA.Editor
             AssignObjectReference(view, "manaFill", manaFill);
             AssignObjectReference(view, "healthText", healthText);
             AssignObjectReference(view, "manaText", manaText);
-            AssignObjectReference(view, "qSlot", qSlot);
-            AssignObjectReference(view, "wSlot", wSlot);
+            AssignObjectArray(view, "skillSlots", skillSlots);
 
             return view;
+        }
+
+        /// <summary>
+        /// 槽位 → 技能槽子对象的固定名字。
+        /// 用 switch 而不是枚举名拼接：对象名要满足本工具"按固定名字清理 / 校验"的约定，
+        /// 枚举一旦被重命名，界面对象名不该跟着漂移。
+        /// </summary>
+        /// <param name="slot">技能槽位。</param>
+        /// <returns>该槽位的子对象名。</returns>
+        private static string ResolveSkillSlotObjectName(SkillSlot slot)
+        {
+            switch (slot)
+            {
+                case SkillSlot.Q: return SkillSlotQName;
+                case SkillSlot.W: return SkillSlotWName;
+                case SkillSlot.E: return SkillSlotEName;
+                case SkillSlot.R: return SkillSlotRName;
+                default: return "SkillSlot_Unknown";
+            }
         }
 
         /// <summary>单个技能槽：底框 + 图标 + CD 径向遮罩 + 秒数 + 蓝耗 + 按键提示。</summary>
         private static SkillSlotView BuildSkillSlot(
             Transform parent, string objectName, SkillSlot slot, Font font, Vector2 anchoredPosition)
         {
-            const float slotSize = 56f;
-
             GameObject holder = CreateUIObject(objectName, parent);
             SetupRect(holder, AnchorBottomLeft, AnchorBottomLeft, AnchorBottomLeft,
-                anchoredPosition, new Vector2(slotSize, slotSize));
+                anchoredPosition, new Vector2(SkillSlotSize, SkillSlotSize));
 
             SkillSlotView view = Undo.AddComponent<SkillSlotView>(holder);
 
@@ -812,7 +915,7 @@ namespace MOBA.Editor
         }
 
         /// <summary>
-        /// 小地图（D6 批准纳入本轮）：右下角一块正方形区域 + 池化的单位标记。
+        /// 小地图（D6 批准纳入本轮）：右下角一块按战场长宽比取形的区域 + 池化的单位标记。
         ///
         /// 世界 → 小地图的映射范围取自【地面覆盖范围】（与 NavMesh 烘焙用的是同一份包围盒），
         /// 因此小地图的边界与"实际可走的地面"严格一致 —— 不会出现"看着还在小地图边缘、人却已经跑出去了"。
@@ -823,9 +926,19 @@ namespace MOBA.Editor
         /// <returns>小地图视图组件。</returns>
         private static MinimapView BuildMinimap(Transform parent, TeamType localTeam, List<string> notes)
         {
+            // 世界映射范围 = 地面覆盖范围。与 NavMesh 烘焙共用同一个包围盒计算方法，
+            // 保证"小地图上能看到的范围"与"实际能走的地面"是同一份数据。
+            Bounds groundBounds = ComputeRequiredGroundBounds();
+
+            // 【阶段八：小地图按战场长宽比取形】原实现固定 220×220 正方形。桥梁地形是 120×40（3:1），
+            // 若仍画成正方形，世界 X 与 Z 会被分别压进两个方向，标记在图上被纵向"压扁"——
+            // 位置虽然仍与真实坐标一一对应（不会错位），但玩家读不出"桥有多长"，形状也与战场完全不符。
+            // 这里按地面长宽比换算高度（宽度固定），并夹一个下限避免极端比例下退化成一条线。
+            Vector2 minimapSize = ResolveMinimapSize(groundBounds);
+
             GameObject panel = CreateUIObject(MinimapName, parent);
             SetupRect(panel, AnchorBottomRight, AnchorBottomRight, AnchorBottomRight,
-                new Vector2(-24f, 24f), MinimapSize);
+                new Vector2(-24f, 24f), minimapSize);
 
             CreateImage(
                 panel.transform, MinimapBackgroundName, null, MinimapBackgroundColor,
@@ -848,10 +961,6 @@ namespace MOBA.Editor
 
             template.SetActive(false);
 
-            // 世界映射范围 = 地面覆盖范围。与 NavMesh 烘焙共用同一个包围盒计算方法，
-            // 保证"小地图上能看到的范围"与"实际能走的地面"是同一份数据。
-            Bounds groundBounds = ComputeRequiredGroundBounds();
-
             AssignObjectReference(view, "markerTemplate", icon);
             AssignObjectReference(view, "markerHost", area.transform);
             AssignObjectReference(view, "mapRect", area.GetComponent<RectTransform>());
@@ -862,9 +971,32 @@ namespace MOBA.Editor
 
             notes.Add(
                 $"小地图已装配（映射范围 {groundBounds.size.x:F0}×{groundBounds.size.z:F0} 米，" +
+                $"面板 {minimapSize.x:F0}×{minimapSize.y:F0} 像素（按战场长宽比取形），" +
                 $"中心 ({groundBounds.center.x:F0}, {groundBounds.center.z:F0})，标记池 {MinimapMarkerPrewarmCount}）");
 
             return view;
+        }
+
+        /// <summary>
+        /// 按战场长宽比换算小地图面板尺寸（宽度固定为 MinimapSize.x，高度按比例算）。
+        ///
+        /// 【为什么必须按比例】MinimapView 的映射是"世界 X 归一化 → 小地图横向、世界 Z 归一化 → 小地图纵向"，
+        /// 两个方向各用各的尺寸。若面板是正方形而战场是 120×40 的长桥，
+        /// 纵向就会被压缩到 1/3 —— 位置仍然一一对应（不会错位），但形状失真、玩家读不出地形。
+        /// 让面板与战场同比例后，小地图才真正是战场的缩略图。
+        ///
+        /// 高度夹在 [MinimapMinHeight, MinimapSize.y]：下限保证可读性，上限保证 HUD 布局不被向上侵占。
+        /// </summary>
+        /// <param name="groundBounds">地面水平包围盒（与 NavMesh 烘焙同源）。</param>
+        /// <returns>小地图面板尺寸（像素）。</returns>
+        private static Vector2 ResolveMinimapSize(Bounds groundBounds)
+        {
+            float width = Mathf.Max(1f, MinimapSize.x);
+            float sizeX = Mathf.Max(0.01f, groundBounds.size.x);
+            float sizeZ = Mathf.Max(0.01f, groundBounds.size.z);
+
+            float height = Mathf.Clamp(width * (sizeZ / sizeX), MinimapMinHeight, MinimapSize.y);
+            return new Vector2(width, height);
         }
 
         /// <summary>阶段四的对局结算界面（OnGUI 实现，本步骤只负责把它装配进场景并注入引用）。</summary>
@@ -949,6 +1081,13 @@ namespace MOBA.Editor
             AssignObjectReference(view, "barCanvas", canvas);
             AssignObjectReference(view, "fillImage", fill);
             AssignObjectReference(view, "shieldImage", shield);
+
+            // 满血也显示血条（阶段八实机修复）。
+            // 【为什么必须由工具显式写入而不是靠字段默认值】本字段此前是 true（满血隐藏），而场景里的
+            // 血条模板是【已存在的资产】—— 它的序列化数据里存着 true，改 C# 默认值对它毫无影响。
+            // 不显式写入的话，症状（英雄刚复活/满血时完全没有血条）在重新组装后照旧，
+            // 且 Console 一片安静 —— 与 PatchMinionPrefabTuning 踩过的坑完全同源。
+            AssignBool(view, "hideWhenFull", false);
 
             // 模板必须非激活：它只是池的样板，不该出现在画面里。
             template.SetActive(false);
@@ -1136,8 +1275,12 @@ namespace MOBA.Editor
             CheckObjectReference(problems, hud, "hero", "玩家 HUD.英雄");
             CheckObjectReference(problems, hud, "healthFill", "玩家 HUD.血条");
             CheckObjectReference(problems, hud, "manaFill", "玩家 HUD.蓝条");
-            CheckObjectReference(problems, hud, "qSlot", "玩家 HUD.Q 槽");
-            CheckObjectReference(problems, hud, "wSlot", "玩家 HUD.W 槽");
+
+            // 【阶段八：Q / W 两个字段已升级为 skillSlots 四元素数组】
+            // 装配侧（BuildHeroHUD）会按 (int)SkillSlot 循环建 4 个槽并整体写入数组，
+            // 校验侧必须跟着改 —— 否则每次组装都会刷出两条"字段 qSlot 不存在"的假错误，
+            // 而这类假错误比"没有校验"更糟：它会训练人忽略 Console，而本项目整套流程都依赖 Console 暴露真问题。
+            CheckArrayField(problems, hud, "skillSlots", "玩家 HUD.技能槽数组");
 
             CheckObjectReference(problems, scoreboard, "statsTracker", "计分板.统计源");
             CheckObjectReference(problems, killFeed, "statsTracker", "播报.统计源");
@@ -1203,6 +1346,13 @@ namespace MOBA.Editor
         }
 
         /// <summary>读一个数组字段并检查是否非空（只读）。</summary>
+        /// <summary>
+        /// 读一个对象引用数组字段并检查是否为空（只读，不做任何修改）。
+        ///
+        /// 【为什么要逐元素检查】"数组有长度"不等于"有内容"：技能槽数组里混一个 null，
+        /// 界面上就少一个技能槽（uGUI 不报错，只是那一格什么都不显示），
+        /// 而只查 arraySize 的校验会给出"通过"的结论 —— 这正是本方法要堵的盲区。
+        /// </summary>
         private static void CheckArrayField(
             List<string> problems, UnityEngine.Object target, string fieldName, string label)
         {
@@ -1224,6 +1374,15 @@ namespace MOBA.Editor
             if (!property.isArray || property.arraySize == 0)
             {
                 problems.Add($"{label}：字段 {fieldName} 为空数组");
+                return;
+            }
+
+            for (int i = 0; i < property.arraySize; i++)
+            {
+                if (property.GetArrayElementAtIndex(i).objectReferenceValue == null)
+                {
+                    problems.Add($"{label}：字段 {fieldName} 的第 {i} 个元素未注入（界面上会少一格）");
+                }
             }
         }
 

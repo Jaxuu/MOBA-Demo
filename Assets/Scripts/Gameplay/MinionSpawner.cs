@@ -1,6 +1,8 @@
 ﻿using System.Collections;
 using UnityEngine;
+using UnityEngine.AI;
 using MOBA.AI;
+using MOBA.Components;
 using MOBA.Core;
 using MOBA.Data;
 
@@ -35,6 +37,38 @@ namespace MOBA.Gameplay
         [Tooltip("注入给小兵的推进路线。蓝红双方使用【节点顺序相反】的两条 LanePath 来表达相反的行进方向。")]
         [SerializeField] private LanePath targetLane;
 
+        [Tooltip("同一波内相邻小兵的出生点横向错开步长（世界坐标向量）。\n" +
+                 "波内第 i 个（共 N 个）小兵出生在 spawnPoint.position + 本向量 × (i - (N-1)/2)，\n" +
+                 "即【以出生点为中心左右对称错开】。\n" +
+                 "为什么必须错开：同一波的小兵原本叠在同一个坐标上出生，NavMeshAgent 会互相顶住，\n" +
+                 "而 MoveState 判定「到达路径点」要求代理速度归零 —— 被邻居推挤时速度永远不为零，\n" +
+                 "于是第一个路径点长期判不到达、停滞检测每秒重下一次无效指令，\n" +
+                 "表现为「小兵挤成一团卡在出生点附近发呆」。\n" +
+                 "默认沿 Z 轴错开：本项目的兵线沿 X 轴推进，Z 轴即桥面的横向。")]
+        [SerializeField] private Vector3 spawnOffsetStep = new Vector3(0f, 0f, 1.2f);
+
+        /// <summary>出生点吸附 NavMesh 时的采样半径（米）。出生点通常只在地面高度上略有偏差，1 米足够。</summary>
+        private const float SpawnNavMeshSampleRadius = 1f;
+
+        /// <summary>
+        /// 小兵的避让优先级基准（阶段八新增）。取值区间 [60, 79]，与英雄的 [30, 39] 明确错开。
+        ///
+        /// 【为什么是 public const】AutoSceneBuilder 写小兵预制体的默认值时也要用同一个数字
+        /// （见 PatchMinionPrefabTuning）—— 设计值只能有一个来源，否则"运行时 60 / 预制体 50"
+        /// 这种不一致只会在实机上表现为"小兵仍然互相顶住"。
+        ///
+        /// 【为什么要按序号轮转而不是统一给一个值】Unity 的局部避让在"所有代理优先级相同"时是对称的：
+        /// 两个单位迎面撞上会互相顶住、谁也过不去。桥面收窄到 14 米后，塔洞两侧只有 5.2 米通行带，
+        /// 这种对称顶死在实机里就是"整队挤在兵线节点上不动"。
+        /// 按生成序号轮转（跨度 20）能让同一屏内的小兵取值互不相同，从而打破对称。
+        ///
+        /// 【为什么英雄的优先级更高（数值更小）】小兵该给英雄让路，而不是把英雄堵在兵线上。
+        /// </summary>
+        public const int MinionAvoidancePriorityBase = 60;
+
+        /// <summary>小兵避让优先级的轮转跨度（0~19）。</summary>
+        public const int MinionAvoidancePrioritySpan = 20;
+
         [Header("调试")]
         [Tooltip("在 Console 输出每次生成小兵的记录。小兵数量多时比较吵，默认关闭。")]
         [SerializeField] private bool logSpawnEvents = false;
@@ -47,6 +81,12 @@ namespace MOBA.Gameplay
 
         /// <summary>是否已就"波次节奏配置异常"告过警，防止每波重复打印。</summary>
         private bool hasReportedRhythmIssue;
+
+        /// <summary>
+        /// 是否已就"出生点附近采样不到 NavMesh"告过警。
+        /// 与其它一次性告警同一理由：每波都会生成小兵，不加标记会持续刷屏。
+        /// </summary>
+        private bool hasReportedOffMeshSpawn;
 
         /// <summary>是否正在出兵（只读）。</summary>
         public bool IsSpawning => spawnRoutine != null;
@@ -198,6 +238,32 @@ namespace MOBA.Gameplay
         }
 
         /// <summary>
+        /// 报告一次"出生点附近采样不到 NavMesh"。
+        /// 用一次性标记的原因：每波都会生成小兵，不加标记会持续刷屏。
+        ///
+        /// 不阻断出兵：NavMeshAgent 自身还有一次自动吸附的机会，直接放弃出兵反而会让
+        /// "一条兵都出不来"这种更严重的问题盖住"落点略有偏差"这条提示。
+        /// </summary>
+        /// <param name="position">本次采样失败的位置。</param>
+        private void ReportOffMeshSpawnOnce(Vector3 position)
+        {
+            if (hasReportedOffMeshSpawn)
+            {
+                return;
+            }
+
+            hasReportedOffMeshSpawn = true;
+
+            Debug.LogWarning(
+                $"[MinionSpawner] {name} 在出生点 ({position.x:F2}, {position.y:F2}, {position.z:F2}) 附近 " +
+                $"{SpawnNavMeshSampleRadius:F1} 米内采样不到 NavMesh，本次按原始坐标生成。\n" +
+                "  · 后果：NavMeshAgent 需要靠引擎自动吸附才能落回网格，若吸附失败该小兵会永久无法移动" +
+                "（并打出「not close enough to the NavMesh」）。\n" +
+                "  · 修法：确认出生点位于已烘焙的 NavMesh 覆盖范围内（AutoSceneBuilder 组装时会做这项校验）。",
+                this);
+        }
+
+        /// <summary>
         /// 出兵主循环。
         ///
         /// 计时基准：波次间隔以【上一波首个小兵出生的时刻】为准，即"每 N 秒必定开始一波"，
@@ -214,7 +280,7 @@ namespace MOBA.Gameplay
 
                 for (int i = 0; i < waveCount; i++)
                 {
-                    SpawnOne();
+                    SpawnOne(i, waveCount);
 
                     // 波内最后一个不等待：等待时间统一由下面的波次间隔承担。
                     // Mathf.Max 兜住 0 值，避免"间隔填 0"时协程在一帧内把整波出完（会瞬间刷出大量单位）。
@@ -239,10 +305,40 @@ namespace MOBA.Gameplay
         /// 生成一个小兵并完成配置注入。
         /// 生成失败（预制体缺关键组件）时会立刻销毁实例：一个没有 EntityBase/AI 的"半成品"
         /// 留在场景里只会变成无法交互的垃圾对象，还会干扰后续排查。
+        ///
+        /// 【两处与"出生点"有关的处理，都是阶段八实机修复的一部分】
+        /// 1. 【波内横向错开】同一波的小兵不再叠在同一个坐标上出生（见 spawnOffsetStep 字段的说明）。
+        /// 2. 【落点吸附 NavMesh】出生点 Transform 的 y 往往不等于导航网格所在的高度
+        ///    （本项目的地面 Plane 自身带 y 偏移，NavMesh 还会按体素高度量化，两者相差约 0.6 米）。
+        ///    此时 NavMeshAgent 要靠引擎的自动吸附把自己"拉"到网格上，属于"能用但不可依赖"的行为。
+        ///    这里显式做一次采样，把落点直接放到网格表面 —— 与 AutoSceneBuilder 放置英雄实例是同一做法，
+        ///    保证"小兵一出生就在 NavMesh 上"。采样失败时退回原始坐标并告警一次（不阻断出兵）。
         /// </summary>
-        private void SpawnOne()
+        /// <param name="indexInWave">本小兵在波内的下标（0 起），用于计算横向错开量。</param>
+        /// <param name="waveCount">本波的小兵总数，用于把错开量居中。</param>
+        private void SpawnOne(int indexInWave, int waveCount)
         {
-            GameObject instance = Instantiate(spawnData.MinionPrefab, spawnPoint.position, spawnPoint.rotation);
+            Vector3 spawnPosition = spawnPoint.position;
+
+            // 以出生点为中心左右对称错开：下标 0..N-1 映射到 -(N-1)/2 .. +(N-1)/2。
+            if (spawnOffsetStep != Vector3.zero && waveCount > 1)
+            {
+                float centeredIndex = indexInWave - (waveCount - 1) * 0.5f;
+                spawnPosition += spawnOffsetStep * centeredIndex;
+            }
+
+            // 采样半径取 1 米：出生点通常只在地面高度上略有偏差，1 米足以覆盖，
+            // 又不会把落点吸附到隔壁的导航区域上去。
+            if (NavMesh.SamplePosition(spawnPosition, out NavMeshHit hit, SpawnNavMeshSampleRadius, NavMesh.AllAreas))
+            {
+                spawnPosition = hit.position;
+            }
+            else
+            {
+                ReportOffMeshSpawnOnce(spawnPosition);
+            }
+
+            GameObject instance = Instantiate(spawnData.MinionPrefab, spawnPosition, spawnPoint.rotation);
 
             EntityBase entity = instance.GetComponent<EntityBase>();
             EntityAIController ai = instance.GetComponent<EntityAIController>();
@@ -267,6 +363,17 @@ namespace MOBA.Gameplay
 
             // 注入推进路线。传 null 时 InitializeAI 会沿用预制体上直挂的 LanePath。
             ai.InitializeAI(targetLane);
+
+            // 避让优先级（阶段八新增）：必须在 Initialize 之后——EntityBase.Initialize 会把
+            // MovementComponent 的引用补全（动态创建时 Awake 里可能还没挂上），
+            // 走 entity.Movement 拿到的才是可靠的引用。
+            // 取值按累计生成序号轮转，保证同屏小兵互不相同（理由见常量注释）。
+            MovementComponent movement = entity.Movement;
+            if (movement != null)
+            {
+                movement.SetAvoidancePriority(
+                    MinionAvoidancePriorityBase + totalSpawnedCount % MinionAvoidancePrioritySpan);
+            }
 
             totalSpawnedCount++;
 

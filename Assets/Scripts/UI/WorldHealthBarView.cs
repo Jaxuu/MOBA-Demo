@@ -57,8 +57,18 @@ namespace MOBA.UI
         [SerializeField] private float maxScale = 8f;
 
         [Header("显示策略")]
-        [Tooltip("满血时隐藏（README 明确要求）。受伤后自动出现，回满后自动消失。")]
-        [SerializeField] private bool hideWhenFull = true;
+        // 【为什么默认值是 false —— 实机踩出来的"英雄没有血条"】
+        // 本字段此前默认 true（满血即隐藏），而英雄的复活链路会把生命填满（HealthComponent.Revive），
+        // 于是"刚复活 / 刚回满血"的英雄在画面上【一条血条都没有】，看起来就像英雄压根没挂血条，
+        // 而小兵因为长期带伤、血条常在，于是被误判成"只有小兵有血条"的配置问题。
+        //
+        // 这里同时纠正一条被写错的注释：README 对血条的要求只有「跟随头顶 / 敌我配色 / billboard / 池化复用」，
+        // 并没有"满血隐藏"这一条（见 README 阶段七验收表）。白盒测试期最重要的恰恰是
+        // 「一眼看清场上有几个单位、谁是谁」，因此让血条常显才是正确取舍。
+        // 需要恢复旧观感时，把本字段在 Inspector 里勾上即可（或改一键组装工具的注入值）。
+        [Tooltip("满血时隐藏血条。默认【关闭】—— 白盒期需要每个单位都常显血条；\n" +
+                 "开启后满血单位（含刚复活、刚回满血的英雄）在画面上完全没有血条，容易被误判成「英雄没挂血条」。")]
+        [SerializeField] private bool hideWhenFull = false;
 
         [Tooltip("死亡时隐藏（尸体上留一条空血条没有意义）。")]
         [SerializeField] private bool hideWhenDead = true;

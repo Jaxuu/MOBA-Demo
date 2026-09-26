@@ -14,5 +14,5 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   minionPrefab: {fileID: 3057170169162295303, guid: 21ec2f675fceacf4297a8ccba365d52b, type: 3}
   waveCount: 3
-  spawnInterval: 2
-  waveInterval: 6
+  spawnInterval: 4
+  waveInterval: 12

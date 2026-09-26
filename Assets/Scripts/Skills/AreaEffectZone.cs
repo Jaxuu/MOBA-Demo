@@ -28,6 +28,11 @@ namespace MOBA.Skills
         [Tooltip("在 Console 输出每次周期结算命中的单位数量。")]
         [SerializeField] private bool logZoneEvents = false;
 
+        [Tooltip("是否跟随施法者移动（阶段八新增，由 SkillData.followCaster 在 Initialize 时写入）。\n" +
+                 "true = 每帧把场同步到施法者位置（以自身为中心的持续 AOE，如 E 审判）；\n" +
+                 "false = 场固定在释放时的落点。")]
+        [SerializeField] private bool followCaster = false;
+
         /// <summary>
         /// 范围场的对象名。
         ///
@@ -121,6 +126,9 @@ namespace MOBA.Skills
             // 属性返回的是 EntityBase 在它自己的 Awake 里缓存的引用，动态创建时可能尚未补全。
             sourceTargeting = newSource.GetComponent<TargetingComponent>();
 
+            // 跟随开关来自配置：它是"这个技能长什么样"的一部分，因此属于数据层，而不是运行期决定。
+            followCaster = newData.FollowCaster;
+
             transform.position = center;
 
             float now = Time.time;
@@ -128,6 +136,33 @@ namespace MOBA.Skills
 
             // 周期为 0 时把下次结算时间设为"永不"，真正的"只结算一次"由 Update 的独立分支处理。
             nextTickTime = newData.TickInterval > 0f ? now + newData.TickInterval : float.MaxValue;
+        }
+
+        /// <summary>本范围场是否跟随施法者移动（只读），供调试与测试断言使用。</summary>
+        public bool IsFollowingCaster => followCaster;
+
+        /// <summary>
+        /// 跟随同步：把场搬到施法者脚下。
+        ///
+        /// 【为什么不用"把场设为施法者的子物体"】那会让场的生命周期被父物体绑架——
+        /// 施法者阵亡/被销毁时场会一起消失，而"持续 AOE 在施法者死后是否继续"是一个设计决策，
+        /// 不该由一个层级关系顺带决定。手动同步位置把两件事解耦：
+        /// 施法者失效时场停在原地继续走完剩余时长（当前设计），要改成"随施法者一起消失"
+        /// 也只需在这里加一个分支。
+        ///
+        /// 【为什么不更新 y】场是贴地的作用区域，施法者根节点本身就在地面上，
+        /// 因此直接取 x/z 即可；不取 y 可以避免施法者因为导航吸附而在 y 上抖动时，
+        /// 让场的 Gizmos 跟着上下跳。
+        /// </summary>
+        private void FollowCasterIfNeeded()
+        {
+            if (!followCaster || source == null)
+            {
+                return;
+            }
+
+            Vector3 casterPosition = source.transform.position;
+            transform.position = new Vector3(casterPosition.x, transform.position.y, casterPosition.z);
         }
 
         /// <summary>
@@ -145,6 +180,10 @@ namespace MOBA.Skills
             }
 
             float now = Time.time;
+
+            // 跟随同步必须在结算【之前】：否则"施法者刚走进圈里"的那一帧，
+            // 结算用的还是上一帧的旧位置，表现为"贴身放 E 却打不到人"。
+            FollowCasterIfNeeded();
 
             // 情形一：一次性爆发（未配持续时长）——生成即结算一次并立刻回收。
             if (data.AreaDuration <= 0f)

@@ -1,0 +1,53 @@
+%YAML 1.1
+%TAG !u! tag:yousandi.cn,2023:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a0ba24ee5e75fd149873932d7b01c353, type: 3}
+  m_Name: PoolSelfNova
+  m_EditorClassIdentifier: 
+  slot: 0
+  displayName: "\u81EA\u7206\u51B2\u51FB"
+  description: "\u4EE5\u81EA\u8EAB\u4E3A\u4E2D\u5FC3\u5F15\u7206\u4E00\u6B21\u8303\u56F4\u4F24\u5BB3\uFF0C\u9002\u5408\u88AB\u8FD1\u8EAB\u56F4\u653B\u65F6\u53CD\u6253\u3002"
+  icon: {fileID: 0}
+  castType: 2
+  targetsAlly: 0
+  castRange: 0
+  castTime: 0.35
+  cooldown: 11
+  manaCost: 40
+  projectileSpeed: 14
+  projectileRadius: 0.5
+  maxHitCount: 1
+  maxTravelDistance: 12
+  effectRadius: 3.2
+  areaDuration: 0
+  tickInterval: 0
+  followCaster: 0
+  spawnZoneAtSelf: 1
+  effectType: 0
+  damage: 85
+  shieldValue: 0
+  shieldDuration: 0
+  slowPercent: 0.4
+  slowDuration: 0.6
+  stunDuration: 0
+  executeHealthRatio: 0
+  healAmount: 0
+  empowerBonusDamage: 0
+  empowerDuration: 5
+  silenceDuration: 0
+  hastePercent: 0
+  hasteDuration: 0
+  secondaryEffectType: 8
+  secondaryValue: 0
+  secondaryDuration: 0
+  castVfxId: 
+  hitVfxId: 
+  releaseVfxId: 

@@ -14,5 +14,5 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   maxHealth: 100
   moveSpeed: 3.5
-  detectionRange: 10
+  detectionRange: 24
   attack: {fileID: 11400000, guid: 0e53095ba28cfff499378bcf13679579, type: 2}

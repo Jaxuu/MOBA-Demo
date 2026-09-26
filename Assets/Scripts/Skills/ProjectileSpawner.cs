@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿using System;
+using UnityEngine;
 using MOBA.Core;
 
 namespace MOBA.Skills
@@ -45,6 +46,23 @@ namespace MOBA.Skills
         public GameObject ProjectilePrefab => projectilePrefab;
 
         /// <summary>
+        /// 弹道生成事件（阶段九新增）：每生成一发弹道（技能弹道与普攻弹道都算）广播一次，
+        /// 参数是刚生成并已完成 Initialize 的 <see cref="Projectile"/>。
+        ///
+        /// 【为什么表现层需要它】弹道是**运行期动态创建**的短命对象（命中即 Destroy），
+        /// 既不在 <c>EntityRegistry</c> 里，也没有任何"注册表"能枚举到它。
+        /// 想订阅 <c>Projectile.OnHit</c> 播放命中特效，唯一的接入点就是"它被生成的那一刻"。
+        ///
+        /// 【层级说明】本事件不违反「逻辑层不引用表现资源」：它只是把"我生成了一个弹道"
+        /// 这一既有事实对外广播，订阅方（VfxSpawner）自取所需。逻辑层不知道有谁在听，
+        /// 也没有因此多持有任何特效 / 音效引用。
+        ///
+        /// 【订阅方注意】弹道命中或超时后会自行 Destroy 并把 OnHit 置空，
+        /// 因此订阅方**不需要**退订单个弹道（委托链随对象一起消失）。
+        /// </summary>
+        public event Action<Projectile> OnProjectileSpawned;
+
+        /// <summary>
         /// 生成一发弹道。
         /// </summary>
         /// <param name="source">施法者（弹道起点与伤害归属）。</param>
@@ -58,7 +76,87 @@ namespace MOBA.Skills
                 return null;
             }
 
-            GameObject instance = CreateProjectileInstance(data);
+            Projectile projectile = CreateInitializedProjectile(source, target, data.ProjectileRadius);
+            if (projectile == null)
+            {
+                return null;
+            }
+
+            projectile.Initialize(source, target, data);
+
+            if (logSpawnEvents)
+            {
+                string targetName = target is Component component ? component.name : "null";
+                Debug.Log(
+                    $"[ProjectileSpawner] {name} 生成弹道 {data.DisplayName}（速度 {data.ProjectileSpeed:F1}，" +
+                    $"命中半径 {data.ProjectileRadius:F2}）→ 目标 {targetName}", this);
+            }
+
+            // 广播"弹道已就位"（阶段九）：必须在 Initialize 之后 ——
+            // 订阅方会立刻挂 OnHit，而 Initialize 之前的弹道还没有飞行参数、可能当帧就被回收。
+            OnProjectileSpawned?.Invoke(projectile);
+
+            return projectile;
+        }
+
+        /// <summary>
+        /// 生成一发「普攻弹道」（阶段八新增）：由防御塔等固定建筑调用。
+        ///
+        /// 与技能弹道的唯一区别是载荷——普攻的数值来源是 AttackData，与 SkillData 无关，
+        /// 因此这里直接收数值而不是收一份技能配置。飞行与命中逻辑完全共用。
+        /// </summary>
+        /// <param name="source">发射者（塔）。</param>
+        /// <param name="target">飞行目标。</param>
+        /// <param name="damage">命中时结算的伤害值。</param>
+        /// <param name="speed">飞行速度（米/秒）。</param>
+        /// <param name="radius">命中半径（米）。</param>
+        /// <param name="maxTravelDistance">最大飞行距离（米）。</param>
+        /// <returns>生成的弹道组件；生成失败返回 null（调用方需据此走降级分支）。</returns>
+        public Projectile SpawnAttack(
+            EntityBase source,
+            ITargetable target,
+            float damage,
+            float speed,
+            float radius,
+            float maxTravelDistance)
+        {
+            if (source == null)
+            {
+                return null;
+            }
+
+            Projectile projectile = CreateInitializedProjectile(source, target, radius);
+            if (projectile == null)
+            {
+                return null;
+            }
+
+            projectile.InitializeAttack(source, target, damage, speed, radius, maxTravelDistance);
+
+            if (logSpawnEvents)
+            {
+                string targetName = target is Component component ? component.name : "null";
+                Debug.Log(
+                    $"[ProjectileSpawner] {name} 生成普攻弹道（伤害 {damage:F1}，速度 {speed:F1}）→ 目标 {targetName}", this);
+            }
+
+            OnProjectileSpawned?.Invoke(projectile);
+
+            return projectile;
+        }
+
+        /// <summary>
+        /// 创建弹道实例、摆到发射点并取出 Projectile 组件（技能弹道与普攻弹道共用的前半段）。
+        /// 把这一段抽出来的理由：位置与组件校验是两条路径都必须一致的一步，
+        /// 各写一份迟早出现"技能弹道从胸口发射、普攻弹道从脚底发射"这类口径差异。
+        /// </summary>
+        /// <param name="source">发射者（提供发射点）。</param>
+        /// <param name="target">飞行目标（仅用于日志，允许为 null）。</param>
+        /// <param name="hitRadius">命中半径（米），兜底白盒球体按它换算视觉尺寸。</param>
+        /// <returns>可用的弹道组件；创建或校验失败返回 null。</returns>
+        private Projectile CreateInitializedProjectile(EntityBase source, ITargetable target, float hitRadius)
+        {
+            GameObject instance = CreateProjectileInstance(hitRadius);
             if (instance == null)
             {
                 return null;
@@ -78,23 +176,14 @@ namespace MOBA.Skills
                 return null;
             }
 
-            projectile.Initialize(source, target, data);
-
-            if (logSpawnEvents)
-            {
-                string targetName = target is Component component ? component.name : "null";
-                Debug.Log(
-                    $"[ProjectileSpawner] {name} 生成弹道 {data.DisplayName}（速度 {data.ProjectileSpeed:F1}，" +
-                    $"命中半径 {data.ProjectileRadius:F2}）→ 目标 {targetName}", this);
-            }
-
             return projectile;
         }
 
         /// <summary>
         /// 创建一个弹道实例：优先用预制体，缺失时按开关决定是否代码兜底。
         /// </summary>
-        private GameObject CreateProjectileInstance(SkillData data)
+        /// <param name="hitRadius">命中半径（米），仅用于兜底球体的视觉缩放。</param>
+        private GameObject CreateProjectileInstance(float hitRadius)
         {
             if (projectilePrefab != null)
             {
@@ -122,7 +211,7 @@ namespace MOBA.Skills
                 Destroy(collider);
             }
 
-            float diameter = Mathf.Max(0.1f, data.ProjectileRadius * 2f);
+            float diameter = Mathf.Max(0.1f, hitRadius * 2f);
             fallback.transform.localScale = new Vector3(diameter, diameter, diameter);
 
             MeshRenderer meshRenderer = fallback.GetComponent<MeshRenderer>();

@@ -19,9 +19,35 @@ namespace MOBA.Components
     [DisallowMultipleComponent]
     public class MovementComponent : MonoBehaviour
     {
+        /// <summary>
+        /// 到达停靠距离的设计值（米）。字段默认值与 AutoSceneBuilder 写预制体时都取它 ——
+        /// 【为什么要有这个常量】同一个设计值此前在"字段初始值"与"工具注入值"两处各写一遍，
+        /// 改一处漏一处就会出现"英雄 0.5 / 小兵 0（工具没写）"这种只在实机上表现为
+        /// 「小兵仍然假卡死」的不一致。设计值只能有一个来源。
+        /// </summary>
+        public const float DesignArrivalStoppingDistance = 0.5f;
+
         [Header("调试")]
         [Tooltip("选中该对象时，在 Scene 视图中绘制当前寻路路径与目的地。")]
         [SerializeField] private bool drawPathGizmos = true;
+
+        [Header("代理参数（阶段八：窄道拥堵与假卡死的底层修复）")]
+        [Tooltip("到达目的地的停靠距离（米）。0 表示必须精确站到目标点上。\n" +
+                 "【为什么不能是 0】「到达路径点」的判据是 remainingDistance ≤ stoppingDistance。\n" +
+                 "取 0 时，代理必须精确抵达，而桥面收窄到 14 米后塔洞两侧只有 5.2 米通行带，\n" +
+                 "被邻居推挤的单位速度长期不归零 → 永远判不到达 → 停滞检测每秒重下一次无效指令。\n" +
+                 "取 0.5 米让「到点」在拥堵下也能成立，同时 0.5 远小于最小攻击距离（小兵 2.0 / 英雄 2.5），\n" +
+                 "因此不会出现「停在射程外永远打不到目标」的问题。")]
+        [Min(0f)]
+        [SerializeField] private float arrivalStoppingDistance = DesignArrivalStoppingDistance;
+
+        [Tooltip("避让优先级（0~99）。值【越小】优先级越高，优先级高的代理会挤开优先级低的。\n" +
+                 "【为什么必须差异化】所有代理都取同一个值时，Unity 的局部避让是对称的：\n" +
+                 "两个单位迎面撞上会互相顶住、谁也过不去（窄道里表现为整队卡死）。\n" +
+                 "由注入方按阵营/序号给出不同值即可打破对称：英雄（30 段）高于小兵（60 段），\n" +
+                 "于是小兵会给英雄让路，而小兵之间也因取值不同而不会顶死。")]
+        [Range(0, 99)]
+        [SerializeField] private int avoidancePriority = 50;
 
         [Header("运行时状态（只读，仅供 Inspector 观察调试）")]
         [Tooltip("移动锁。为 true 时拒绝一切新的移动指令并强制停下，由 BuffComponent（眩晕）与 SkillComponent（施法前摇）控制。")]
@@ -115,7 +141,109 @@ namespace MOBA.Components
                 Debug.LogError(
                     $"[MovementComponent] {name} 上找不到 NavMeshAgent 组件，所有移动功能将失效。" +
                     "请检查该组件是否被运行时移除，或该对象是否由代码动态创建（此时需手动 AddComponent）。", this);
+                return;
             }
+
+            // ---- 代理参数在这里统一写入，而不是依赖预制体上的序列化值 ----
+            // 【为什么要由代码兜住】这两个值都属于"错了会静默失效"的一类：
+            //   · stoppingDistance = 0 → 拥堵时永远判不到达（症状是"整队卡在兵线上发呆"，Console 只有告警）；
+            //   · 避让优先级全同    → 窄道里对称顶死（症状是"单位互相卡住不动"，同样没有任何报错）。
+            // 而预制体资产是仓库里长期存在的文件，一旦有人在 Inspector 里手工改过、
+            // 或引擎升级改变了缺省填充行为，序列化值就不再可靠。在 Awake 里显式写入，
+            // 才能保证"每次组装后这两个值一定等于设计值"（与"场景装配必须自动化"这条铁律一致）。
+            //
+            // 【为什么放在 Awake 而不是 Start】Awake 早于所有 Start，也早于 EntityBase.ApplyStats
+            // （后者在 Start 里写 speed），因此这里写入的参数不会被任何后续注入覆盖。
+            agent.stoppingDistance = Mathf.Max(0f, arrivalStoppingDistance);
+            agent.avoidancePriority = Mathf.Clamp(avoidancePriority, 0, 99);
+        }
+
+        /// <summary>
+        /// 设置避让优先级（阶段八新增）。由注入方按"阵营 + 序号"给出不同的值，打破局部避让的对称性。
+        ///
+        /// 【为什么允许运行期修改而不是只在 Awake 读一次】小兵是运行时由 MinionSpawner 批量生成的，
+        /// 生成方需要在 Initialize 之后立刻给出各自的优先级；走公开方法比反射写私有字段可靠得多
+        /// （反射写不会被 Unity 序列化系统感知，也不会同步到 NavMeshAgent）。
+        /// </summary>
+        /// <param name="priority">避让优先级，会被夹到 0~99。</param>
+        public void SetAvoidancePriority(int priority)
+        {
+            avoidancePriority = Mathf.Clamp(priority, 0, 99);
+
+            if (agent != null)
+            {
+                agent.avoidancePriority = avoidancePriority;
+            }
+        }
+
+        /// <summary>
+        /// 启用 / 禁用寻路代理（阶段八自审补齐）。
+        ///
+        /// 【为什么必须由本类提供这个入口】本类的职责边界写得很明确：
+        /// "本项目里【唯一】负责驱动 NavMeshAgent 的模块，其他模块不允许自己持有 NavMeshAgent"。
+        /// 但死亡冻结（DeadState）与英雄死亡收尾（HeroController.HandleDied）此前都是自己
+        /// `GetComponent&lt;NavMeshAgent&gt;()` 再写 `enabled = false` —— 三处各自持有同一个引擎组件，
+        /// 正是这条边界要防的分叉：任何一处改了禁用条件（例如"禁用的同时还要清路径"），
+        /// 另外两处不会跟着变。
+        ///
+        /// 【幂等】重复设置同一状态不产生额外操作；代理缺失时静默返回（建筑没有代理是正常配置）。
+        /// </summary>
+        /// <param name="value">true = 启用代理；false = 禁用（尸体退出导航网格的局部避让计算）。</param>
+        public void SetAgentEnabled(bool value)
+        {
+            if (agent == null || agent.enabled == value)
+            {
+                return;
+            }
+
+            agent.enabled = value;
+        }
+
+        /// <summary>
+        /// 把单位瞬移到指定位置（阶段八自审补齐，供复活搬运使用）。
+        ///
+        /// 【为什么"先启用代理再 Warp"这件事必须封装在这里】顺序反了的症状是"复活了，但人还躺在原地"，
+        /// 而且不报任何错（NavMeshAgent 在禁用状态下 Warp 不生效）。此前这个顺序约定写在
+        /// HeroController.Revive 的注释里、靠调用方记性维持；收进本类之后，顺序成为实现细节，
+        /// 调用方不可能弄反。
+        ///
+        /// 【失败降级】Warp 返回 false（目标点不在 NavMesh 上）时退化为直接写 Transform + nextPosition：
+        /// 至少让单位出现在目标点，同时把问题明确报出来，而不是让它在原地复活。
+        /// </summary>
+        /// <param name="position">目标世界坐标。</param>
+        /// <returns>Warp 成功返回 true；失败（已降级为直接设坐标）返回 false。</returns>
+        public bool WarpTo(Vector3 position)
+        {
+            if (agent == null)
+            {
+                ReportMissingAgentOnce();
+                return false;
+            }
+
+            // 顺序不可颠倒：禁用状态下 Warp 不生效。
+            agent.enabled = true;
+
+            if (agent.Warp(position))
+            {
+                if (!agent.isOnNavMesh)
+                {
+                    Debug.LogError(
+                        $"[MovementComponent] {name} 瞬移到 {position} 后代理不在 NavMesh 上，" +
+                        "该单位将无法寻路移动。请检查目标点是否在已烘焙的 NavMesh 覆盖范围内。", this);
+                }
+
+                return true;
+            }
+
+            transform.position = position;
+            agent.nextPosition = position;
+
+            Debug.LogError(
+                $"[MovementComponent] {name} 无法通过 NavMeshAgent.Warp 到达 {position}" +
+                "（通常意味着该点不在已烘焙的 NavMesh 上），已退化为直接设置坐标。" +
+                "请检查目标点是否落在地面覆盖范围内、以及 NavMesh 是否已烘焙。", this);
+
+            return false;
         }
 
         /// <summary>

@@ -1,0 +1,52 @@
+%YAML 1.1
+%TAG !u! tag:yousandi.cn,2023:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a0ba24ee5e75fd149873932d7b01c353, type: 3}
+  m_Name: PoolStunBolt
+  m_EditorClassIdentifier: 
+  slot: 0
+  displayName: "\u7729\u6655\u5F39"
+  description: "\u9501\u5B9A\u4E00\u540D\u654C\u65B9\u5355\u4F4D\u53D1\u5C04\u5F39\u4E38\uFF0C\u547D\u4E2D\u65F6\u9020\u6210\u5C11\u91CF\u4F24\u5BB3\u5E76\u7729\u6655\u3002"
+  icon: {fileID: 0}
+  castType: 0
+  targetsAlly: 0
+  castRange: 8
+  castTime: 0.2
+  cooldown: 12
+  manaCost: 45
+  projectileSpeed: 16
+  projectileRadius: 0.5
+  maxHitCount: 1
+  maxTravelDistance: 12
+  effectRadius: 3.5
+  areaDuration: 4
+  tickInterval: 0.5
+  followCaster: 0
+  effectType: 3
+  damage: 120
+  shieldValue: 0
+  shieldDuration: 0
+  slowPercent: 0.4
+  slowDuration: 0.6
+  stunDuration: 1.2
+  executeHealthRatio: 0
+  healAmount: 0
+  empowerBonusDamage: 0
+  empowerDuration: 5
+  silenceDuration: 0
+  hastePercent: 0
+  hasteDuration: 0
+  secondaryEffectType: 0
+  secondaryValue: 40
+  secondaryDuration: 0
+  castVfxId: 
+  hitVfxId: 
+  releaseVfxId: 

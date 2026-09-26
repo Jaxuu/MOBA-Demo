@@ -14,9 +14,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   maxHealth: 500
   moveSpeed: 6
-  detectionRange: 8
+  detectionRange: 20
   attack: {fileID: 11400000, guid: 6d5f925fc3b512940ad5f92a969797e3, type: 2}
   maxMana: 300
   manaRegenPerSecond: 10
-  skillQ: {fileID: 11400000, guid: fe3adf32fb99e3946ba78f5664ed2206, type: 2}
-  skillW: {fileID: 11400000, guid: 14e4c142f715b5242b406b154c019775, type: 2}
+  skillQ: {fileID: 0}
+  skillW: {fileID: 0}
+  skillE: {fileID: 0}
+  skillR: {fileID: 0}

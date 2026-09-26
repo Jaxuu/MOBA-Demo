@@ -29,12 +29,14 @@ namespace MOBA.Debugging
     ///
     /// 与其它组件自带 Gizmos 的分工（避免重复绘制）：
     /// TargetingComponent 画"锁定的目标连线"、CombatComponent 画"攻击距离"。
-    /// 本类补的是 AI 视角独有的三个量：
+    /// 本类补的是 AI 视角独有的四个量：
     ///   1. 索敌半径（黄）——多大范围内会发现敌人；
-    ///   2. 最大追击半径（红）——离目标多远就放弃；
-    ///   3. 牵引极限（青）——被牵着离开追击起点多远就强制返回兵线。
-    /// 黄色与红色之间的环带是【滞回余量】，是验证"目标在半径边缘飘动不会引起状态震荡"的依据；
-    /// 青色球则是验证"被引离路线超过限制"这一条的依据。
+    ///   2. 追击发起半径（绿）——敌人在这个范围内才会【脱离兵线】去追（阶段八新增）；
+    ///   3. 最大追击半径（红）——离目标多远就放弃；
+    ///   4. 牵引极限（青）——被牵着离开追击起点多远就强制返回兵线。
+    /// 黄球与绿球之间的差距是本项目最容易混淆的一点：视野可以很大，但"值得脱线"的范围必须很小。
+    /// 绿球与红球之间的环带是【滞回余量】，是验证"目标在半径边缘飘动不会引起状态震荡"的依据；
+    /// 青球则是验证"被引离路线超过限制"这一条的依据。
     /// </summary>
     [RequireComponent(typeof(EntityAIController))]
     [DisallowMultipleComponent]
@@ -51,7 +53,12 @@ namespace MOBA.Debugging
         [Tooltip("索敌半径（Detection Range）线框球的颜色。")]
         [SerializeField] private Color detectionRangeColor = Color.yellow;
 
-        [Tooltip("最大追击半径（索敌半径 × 追击系数）线框球的颜色。")]
+        [Tooltip("追击发起半径（Chase Engage Range）线框球的颜色。\n" +
+                 "敌人在这个范围内才允许【从推进/待机状态】脱离兵线去追击；它必须远小于索敌半径，\n" +
+                 "否则单位会被远处的敌人勾走整段脱线。")]
+        [SerializeField] private Color engageRangeColor = Color.green;
+
+        [Tooltip("最大追击半径（追击发起半径 × 放弃系数）线框球的颜色。")]
         [SerializeField] private Color chaseRangeColor = Color.red;
 
         [Tooltip("绘制牵引极限球（与追击起点锚点的最大允许距离）。\n" +
@@ -160,8 +167,14 @@ namespace MOBA.Debugging
             }
 
             float detectionRadius = ResolveDetectionRadius(ai);
-            float chaseRadius = detectionRadius * ai.ChaseAbandonRangeFactor;
-            float leashRadius = detectionRadius * ai.ChaseLeashRangeFactor;
+
+            // 【必须读控制器的属性，而不是自己乘系数】
+            // 追击 / 牵引的基准已经从"索敌半径"换成了"追击发起半径"（见 EntityAIController.ChaseEngageDistance）。
+            // 若这里仍然写成 `detectionRadius × 系数`，画出来的球会比真实判定范围大好几倍，
+            // 排查"为什么 AI 明明看见了却不追"时会把人引向完全错误的方向。
+            float engageRadius = ai.ChaseEngageDistance;
+            float chaseRadius = ai.ChaseAbandonDistance;
+            float leashRadius = ai.ChaseLeashDistance;
 
             Vector3 origin = transform.position;
 
@@ -172,8 +185,16 @@ namespace MOBA.Debugging
                 Gizmos.DrawWireSphere(origin, detectionRadius);
             }
 
+            // 绿色线框球 = 追击发起半径：只有敌人在这个范围内，才允许脱离兵线去追。
+            // 它与黄色球之间的环带是【"看得见但不值得追"】的区域 —— 单位会照常沿兵线推进。
+            if (engageRadius > 0f && engageRadius < detectionRadius)
+            {
+                Gizmos.color = engageRangeColor;
+                Gizmos.DrawWireSphere(origin, engageRadius);
+            }
+
             // 红色线框球 = 最大追击半径：与目标的距离超过它就会放弃追击、返回兵线。
-            // 它与黄色球之间的环带即【滞回余量】——目标在该环带内飘动不会触发任何状态切换，
+            // 它与绿色球之间的环带即【滞回余量】——目标在该环带内飘动不会触发任何状态切换，
             // 这正是"Move ↔ Chase 不会每帧互切"的可视化依据（见 README 3.2 行为优先级第 3 条）。
             if (chaseRadius > 0f)
             {

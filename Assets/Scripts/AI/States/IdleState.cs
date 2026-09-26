@@ -99,8 +99,9 @@ namespace MOBA.AI
                 return;
             }
 
-            // 切换被拒绝（本单位不具备追击能力，见 EntityAIController.TryEnterChaseState）
-            // → 敌人不构成威胁，继续往下判断是否需要回到推进状态。
+            // 切换被拒绝（本单位不具备追击能力 / 已被牵引出界 / **目标不在追击发起半径内**，
+            // 见 EntityAIController.TryEnterChaseState）→ 敌人不构成威胁，继续往下判断是否需要回到推进状态。
+            // 最后一种是最常见的：索敌半径远大于追击发起半径，"看见但不去追"是常态而非异常。
             if (context.HasRemainingWaypoints)
             {
                 context.TryEnterMoveState();

@@ -1,0 +1,53 @@
+%YAML 1.1
+%TAG !u! tag:yousandi.cn,2023:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: a0ba24ee5e75fd149873932d7b01c353, type: 3}
+  m_Name: HeroSkillE
+  m_EditorClassIdentifier: 
+  slot: 2
+  displayName: "\u5BA1\u5224"
+  description: "\u4EE5\u81EA\u8EAB\u4E3A\u4E2D\u5FC3\u6380\u8D77\u6301\u7EED\u7684\u8303\u56F4\u4F24\u5BB3\uFF0C\u5E76\u8DDF\u968F\u81EA\u5DF1\u79FB\u52A8\uFF0C\u5468\u671F\u6027\u5BF9\u8303\u56F4\u5185\u654C\u65B9\u5355\u4F4D\u7ED3\u7B97\u4F24\u5BB3\u3002"
+  icon: {fileID: 21300000, guid: 68f6da85843664f439e44366a49ff2b6, type: 3}
+  castType: 2
+  targetsAlly: 0
+  castRange: 0
+  castTime: 0.15
+  cooldown: 10
+  manaCost: 55
+  projectileSpeed: 14
+  projectileRadius: 0.5
+  maxHitCount: 1
+  maxTravelDistance: 12
+  effectRadius: 1
+  areaDuration: 3
+  tickInterval: 0.25
+  followCaster: 1
+  spawnZoneAtSelf: 1
+  effectType: 0
+  damage: 18
+  shieldValue: 0
+  shieldDuration: 0
+  slowPercent: 0.4
+  slowDuration: 0.6
+  stunDuration: 0
+  executeHealthRatio: 0
+  healAmount: 0
+  empowerBonusDamage: 0
+  empowerDuration: 5
+  silenceDuration: 0
+  hastePercent: 0
+  hasteDuration: 0
+  secondaryEffectType: 8
+  secondaryValue: 0
+  secondaryDuration: 0
+  castVfxId: SkillE_Cast
+  hitVfxId: SkillE_Tick
+  releaseVfxId: SkillE_Zone

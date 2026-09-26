@@ -13,28 +13,41 @@ MonoBehaviour:
   m_Name: HeroSkillQ
   m_EditorClassIdentifier: 
   slot: 0
-  displayName: "\u70C8\u7130\u706B\u7403"
-  description: "\u9501\u5B9A\u4E00\u540D\u654C\u65B9\u5355\u4F4D\uFF0C\u53D1\u5C04\u975E\u7A7F\u900F\u706B\u7403\uFF0C\u547D\u4E2D\u65F6\u9020\u6210\u4F24\u5BB3\u5E76\u9500\u6BC1\u3002"
-  icon: {fileID: 21300000, guid: e7a7791a766a78548aec412b35763b1c, type: 3}
-  castType: 0
-  castRange: 8
-  castTime: 0.25
-  cooldown: 6
-  manaCost: 30
-  projectileSpeed: 14
+  displayName: "\u81F4\u547D\u6253\u51FB"
+  description: "\u7ACB\u523B\u63D0\u5347\u81EA\u8EAB\u79FB\u52A8\u901F\u5EA6\uFF0C\u5E76\u5F3A\u5316\u4E0B\u4E00\u6B21\u666E\u653B\uFF1A\u547D\u4E2D\u65F6\u9020\u6210\u989D\u5916\u4F24\u5BB3\u5E76\u6C89\u9ED8\u76EE\u6807\uFF0C\u547D\u4E2D\u5373\u6D88\u8017\u3002"
+  icon: {fileID: 21300000, guid: f8c38107b13f17044a62edef593f902c, type: 3}
+  castType: 2
+  targetsAlly: 0
+  castRange: 0
+  castTime: 0
+  cooldown: 8
+  manaCost: 25
+  projectileSpeed: 0
   projectileRadius: 0.5
   maxHitCount: 1
   maxTravelDistance: 12
-  effectRadius: 3.5
-  areaDuration: 4
-  tickInterval: 0.5
-  effectType: 0
+  effectRadius: 0
+  areaDuration: 0
+  tickInterval: 0
+  followCaster: 0
+  spawnZoneAtSelf: 0
+  effectType: 4
   damage: 120
   shieldValue: 0
   shieldDuration: 0
   slowPercent: 0.4
   slowDuration: 0.6
   stunDuration: 0
+  executeHealthRatio: 0
+  healAmount: 0
+  empowerBonusDamage: 60
+  empowerDuration: 5
+  silenceDuration: 1.5
+  hastePercent: 0
+  hasteDuration: 0
+  secondaryEffectType: 7
+  secondaryValue: 0.3
+  secondaryDuration: 3
   castVfxId: SkillQ_Cast
-  hitVfxId: SkillQ_Hit
-  releaseVfxId: SkillQ_Projectile
+  hitVfxId: SkillQ_Empower
+  releaseVfxId: SkillQ_Ready

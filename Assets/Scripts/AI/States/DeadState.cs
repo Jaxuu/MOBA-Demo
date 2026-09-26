@@ -1,5 +1,4 @@
 ﻿using UnityEngine;
-using UnityEngine.AI;
 using MOBA.Components;
 using MOBA.Core;
 
@@ -93,10 +92,14 @@ namespace MOBA.AI
             //    否则活着的小兵会绕着一具尸体走（NavMeshAgent 之间会互相推挤）。
             //    必须先于"停止寻路"之外的任何代理操作：Stop() 已在上面第 1 步执行完毕，
             //    此后 MovementComponent 内部的 IsAgentUsable 会因 agent.enabled == false 而全部返回安全默认值。
-            NavMeshAgent agent = owner.GetComponent<NavMeshAgent>();
-            if (agent != null)
+            //
+            //    【阶段八自审修正】此前这里是 `owner.GetComponent<NavMeshAgent>()` 再写 enabled = false ——
+            //    那是绕过 MovementComponent 直接操作代理，与它"本项目里唯一负责驱动 NavMeshAgent 的模块"
+            //    这条职责边界直接冲突（同一件事在 DeadState 与 HeroController 各有一份实现）。
+            //    现在统一走 movement.SetAgentEnabled(false)，与上面第 1 步的 Stop() 是同一个组件实例。
+            if (movement != null)
             {
-                agent.enabled = false;
+                movement.SetAgentEnabled(false);
             }
 
             // 5. 标记为不可选中：计划书 3.4「禁用选中与碰撞」的"选中"一半。

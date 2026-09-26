@@ -6,7 +6,7 @@ using MOBA.Skills;
 namespace MOBA.Controllers
 {
     /// <summary>
-    /// 玩家技能输入控制器：把「Q / W 按键 + 鼠标位置」翻译成「SkillComponent.TryCast 调用」。
+    /// 玩家技能输入控制器：把「Q / W / E / R 按键 + 鼠标位置」翻译成「SkillComponent.TryCast 调用」。
     ///
     /// 【为什么独立于 PlayerCommandController 而不合并】
     /// 1. 职责不同：PlayerCommandController 处理的是"右键 = 移动或普攻"这条单一指令链，
@@ -21,9 +21,18 @@ namespace MOBA.Controllers
     ///    在这里重写一遍必然导致两处规则分叉；
     /// 3. 不生成弹道、不结算伤害、不播表现。
     ///
-    /// 【V1 采用智能施法（按下即释放）】按 Q/W 立刻以鼠标当前位置为目标释放，无需二次确认。
+    /// 【V1 采用智能施法（按下即释放）】按 Q/W/E/R 立刻以鼠标当前位置为目标释放，无需二次确认。
     /// "按 Q 进入瞄准 → 左键确认 → 右键取消"的交互需要技能指示器 UI（方向箭头 / 范围圈），
     /// 属阶段七 HUD 的范围。
+    ///
+    /// 【阶段八：按键扩到四槽，并按技能配置决定拾取哪一侧】
+    /// 拾取规则完全由 SkillData 驱动，输入层不做任何"这个技能大概想要什么"的猜测：
+    ///   · CastType = UnitTarget + TargetsAlly = false → 只拾取敌方单位（鼠标下优先，其次已锁定的普攻目标）；
+    ///   · CastType = UnitTarget + TargetsAlly = true  → 只拾取友方单位；
+    ///   · CastType = GroundPoint                      → 拾取地面落点（射线未命中地面时退回地面平面交点）；
+    ///   · CastType = Self                             → 不需要目标与落点，落点直接取自身位置。
+    /// 一次射线扫描同时记录"最近敌方""最近友方""最近地面"三个候选，最后按配置挑一个——
+    /// 三条拾取路径的口径（距离计算、Layer 过滤、自己排除）因此保持完全一致。
     ///
     /// 输入方案说明：与 PlayerCommandController 一致，使用旧输入系统 Input.GetKeyDown。
     /// 若 Player Settings &gt; Active Input Handling 只勾选了 "Input System Package (New)"，
@@ -74,8 +83,9 @@ namespace MOBA.Controllers
         /// <summary>是否已就"缺少 SkillComponent"告警过。</summary>
         private bool hasWarnedMissingSkillComponent;
 
-        /// <summary>是否已就"缺少地面 Layer"告警过（W 技能依赖地面落点）。</summary>
-        private bool hasWarnedMissingGroundLayer;
+        // 说明：这里刻意【不】保留"缺少地面 Layer 的一次性告警标记"。
+        // 该告警发生在 Awake 里，而 Awake 每个组件实例只执行一次，标记永远没有第二个消费方 ——
+        // 它会被编译器报 CS0414（赋值后从未读取），并让读者误以为"存在重复告警需要去重"。
 
         /// <summary>是否已就"缺少主相机"报过错误。</summary>
         private bool hasReportedMissingCamera;
@@ -125,7 +135,6 @@ namespace MOBA.Controllers
                 Debug.LogWarning(
                     $"[PlayerSkillController] 未找到名为 \"{groundLayerName}\" 的 Layer，" +
                     "非指向性技能的落点将退回「射线与地面平面的交点」计算。请到 ProjectSettings > Tags and Layers 中确认该 Layer 存在。", this);
-                hasWarnedMissingGroundLayer = true;
             }
 
             groundLayerIndex = groundLayer;
@@ -148,6 +157,10 @@ namespace MOBA.Controllers
         /// <summary>
         /// 每帧采集技能按键。用 GetKeyDown 而不是 GetKey：
         /// 技能是"按一下放一次"的动作，长按连发属于连招/蓄力机制，README 明确排除。
+        ///
+        /// 【阶段八：槽位从 Q / W 扩到 Q / W / E / R】四键各自独立采集，逐个交给同一条处理链；
+        /// 不写成循环是为了让"哪个键对应哪个槽位"在代码里一眼可见（按键映射属于交互决策，
+        /// 用一张表反而要多跳一层才能确认）。
         /// </summary>
         private void Update()
         {
@@ -164,6 +177,16 @@ namespace MOBA.Controllers
             if (Input.GetKeyDown(KeyCode.W))
             {
                 HandleSkillKey(SkillSlot.W);
+            }
+
+            if (Input.GetKeyDown(KeyCode.E))
+            {
+                HandleSkillKey(SkillSlot.E);
+            }
+
+            if (Input.GetKeyDown(KeyCode.R))
+            {
+                HandleSkillKey(SkillSlot.R);
             }
         }
 
@@ -222,9 +245,16 @@ namespace MOBA.Controllers
             }
 
             // 与 PlayerCommandController.HandleRightClick 同一套拾取逻辑：
-            // 在全部命中里分别找"最近的敌方单位"与"最近的地面落点"。
+            // 在全部命中里分别找"最近的敌方单位""最近的友方单位"与"最近的地面落点"。
+            //
+            // 【阶段八：为什么要同时找敌我两侧】技能的目标阵营由 SkillData.TargetsAlly 决定
+            // （治疗/护盾类只认友方，伤害/控制类只认敌方）。一次射线只扫一遍，
+            // 两侧各留一个"最近候选"，最后按技能配置挑一个 —— 比"先看技能类型再决定拾取哪一侧"
+            // 少一次分支，也让两侧的拾取口径（距离计算、Layer 过滤）保持完全一致。
             EntityBase hoveredEnemy = null;
             float nearestEnemySqrDistance = float.MaxValue;
+            EntityBase hoveredAlly = null;
+            float nearestAllySqrDistance = float.MaxValue;
             bool hasGroundPoint = false;
             Vector3 groundPoint = Vector3.zero;
             float nearestGroundSqrDistance = float.MaxValue;
@@ -246,23 +276,31 @@ namespace MOBA.Controllers
 
                 if (hitEntity != null)
                 {
-                    // 点到自己：忽略。
+                    // 点到自己：忽略。Self 技能本来就不需要目标，而指向性技能不该把"自己"当成候选
+                    // （否则按 Q 指自己脚下会得到一个"目标非法"的拒绝日志，噪声大于信息量）。
                     if (hitEntity == controlledEntity)
                     {
                         continue;
                     }
 
-                    // 点到友方：忽略该命中，继续看它身后的地面（V1 没有友方指向性技能）。
-                    if (!IsEnemy(hitEntity))
-                    {
-                        continue;
-                    }
+                    float entitySqrDistance = (hit.point - ray.origin).sqrMagnitude;
 
-                    float enemySqrDistance = (hit.point - ray.origin).sqrMagnitude;
-                    if (enemySqrDistance < nearestEnemySqrDistance)
+                    if (IsEnemy(hitEntity))
                     {
-                        nearestEnemySqrDistance = enemySqrDistance;
-                        hoveredEnemy = hitEntity;
+                        if (entitySqrDistance < nearestEnemySqrDistance)
+                        {
+                            nearestEnemySqrDistance = entitySqrDistance;
+                            hoveredEnemy = hitEntity;
+                        }
+                    }
+                    else if (hitEntity.Team != TeamType.Neutral)
+                    {
+                        // 友方候选（中立单位两边都不算，与 Targetable 的敌我规则逐条对齐）。
+                        if (entitySqrDistance < nearestAllySqrDistance)
+                        {
+                            nearestAllySqrDistance = entitySqrDistance;
+                            hoveredAlly = hitEntity;
+                        }
                     }
 
                     // 单位碰撞体不作为地面落点，继续扫描。
@@ -292,12 +330,31 @@ namespace MOBA.Controllers
             }
 
             ITargetable target = null;
-            if (data.CastType == SkillCastType.UnitTarget)
+
+            switch (data.CastType)
             {
-                // 目标优先级：鼠标下的敌方单位 → 当前已锁定的普攻目标 → 无。
-                // 为什么保留第二档：玩家先右键锁定敌人、再按 Q 甩技能是 MOBA 里最常见的操作习惯；
-                // 而且 CurrentTarget 是全项目"当前目标"的唯一存放处，读取它不引入第二份数据。
-                target = hoveredEnemy != null ? (ITargetable)hoveredEnemy : ResolveLockedTarget();
+                case SkillCastType.UnitTarget:
+                    // 目标优先级：鼠标下的对应阵营单位 → 当前已锁定的普攻目标（仅敌方技能）→ 无。
+                    // 为什么保留第二档：玩家先右键锁定敌人、再按 Q 甩技能是 MOBA 里最常见的操作习惯；
+                    // 而且 CurrentTarget 是全项目"当前目标"的唯一存放处，读取它不引入第二份数据。
+                    // 友方技能不读它 —— 那是攻击目标，把它当治疗目标在语义上就是错的。
+                    if (data.TargetsAlly)
+                    {
+                        target = hoveredAlly != null ? (ITargetable)hoveredAlly : null;
+                    }
+                    else
+                    {
+                        target = hoveredEnemy != null ? (ITargetable)hoveredEnemy : ResolveLockedTarget();
+                    }
+
+                    break;
+
+                case SkillCastType.Self:
+                    // 自身施法不需要目标，也不需要落点：把落点填成自身位置，
+                    // 让 SkillComponent 的日志与"以自身为中心的范围场"有同一个锚点。
+                    target = null;
+                    groundPoint = controlledEntity.transform.position;
+                    break;
             }
 
             bool casted = skills.TryCast(slot, groundPoint, target, out string failReason);

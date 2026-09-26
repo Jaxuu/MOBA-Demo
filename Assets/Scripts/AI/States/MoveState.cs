@@ -55,6 +55,16 @@ namespace MOBA.AI
         private bool hasReportedStagnation;
 
         /// <summary>
+        /// 当前路径点已经被判定卡住过几次（阶段八新增）。
+        /// 与 stagnationTimer 的分工：后者衡量"这一轮僵持了多久"，本字段衡量"同一个点总共僵持了几轮"。
+        /// 前者在动起来时清零（走走停停不该算卡死），后者只在【到达路径点 / 跳过路径点 / 换状态】时清零。
+        /// </summary>
+        private int stagnationCycles;
+
+        /// <summary>是否已就"跳过被占住的路径点"报过警告，防止刷屏。</summary>
+        private bool hasReportedWaypointSkip;
+
+        /// <summary>
         /// 构造状态。
         /// </summary>
         /// <param name="context">所属 AI 控制器，必须非空。</param>
@@ -94,6 +104,10 @@ namespace MOBA.AI
         {
             hasIssuedMoveForCurrentWaypoint = false;
             stagnationTimer = 0f;
+
+            // 【刻意不清零 stagnationCycles】本状态在每次追击结束后都会被重新进入，
+            // 若在这里清零，"被占住的路径点"永远攒不够次数（每被牵走一次就归零），跳过机制等于失效。
+            // 它衡量的是"同一个路径点总共僵持了几轮"，因此只在【换路径点】时清零。
         }
 
         /// <summary>
@@ -128,8 +142,10 @@ namespace MOBA.AI
                     return;
                 }
 
-                // 切换被拒绝（本单位不具备追击能力 / 已被牵引出界，见 EntityAIController.TryEnterChaseState）
-                // → 敌人不构成威胁，继续沿路线推进，不做任何额外处理。
+                // 切换被拒绝（三种原因：本单位不具备追击能力 / 已被牵引出界 / **目标不在追击发起半径内**，
+                // 见 EntityAIController.TryEnterChaseState）→ 敌人不构成威胁，继续沿路线推进，不做任何额外处理。
+                // 第三种是最常见的一种：索敌半径（小兵 24 米）远大于追击发起半径（7 米），
+                // 因此"看见但不去追"是推进过程中的常态，不是异常，这里刻意不输出任何日志。
             }
 
             // ---------- 2. 沿路线推进 ----------
@@ -178,6 +194,7 @@ namespace MOBA.AI
                 currentWaypointIndex++;
                 hasIssuedMoveForCurrentWaypoint = false;
                 stagnationTimer = 0f;
+                stagnationCycles = 0;
 
                 // 抵达路径点 = 本单位已真正回到兵线，此时才允许清除追击起点锚点、重新获得追击资格。
                 // 为什么必须放在这里而不是 Enter()：若进入推进状态就清除，单位在"返回兵线途中"
@@ -200,7 +217,25 @@ namespace MOBA.AI
                     // 重新下达会让代理重算一次路径，若堵路的单位已经走开即可自愈。
                     stagnationTimer = 0f;
                     hasIssuedMoveForCurrentWaypoint = false;
+                    stagnationCycles++;
+
                     ReportStagnationOnce();
+
+                    // ---------- 6. 多次重试仍无效 → 跳过这个被占住的路径点（阶段八新增）----------
+                    // 【为什么必须有这一步】"重新下达"只能治"堵路的单位已经走开"，
+                    // 治不了"这个点被长期占住"。5v5 之后同屏 40+ 单位、桥面收窄到 14 米，
+                    // 兵线节点恰好落在塔洞两侧的通行带上，被占住是常态而非异常。
+                    // 不跳过的话单位会永久停在那一站 —— 实机日志里反复出现的
+                    // 「[MoveState] 连续 1.0 秒几乎未移动，判定为被卡住」正是这条。
+                    // 跳过一个节点不会让单位脱线：下一个节点仍在同一条兵线上，只是绕开了这个堵点。
+                    int skipThreshold = context.WaypointSkipAfterStagnationCycles;
+
+                    if (skipThreshold > 0 && stagnationCycles >= skipThreshold)
+                    {
+                        stagnationCycles = 0;
+                        currentWaypointIndex++;
+                        ReportWaypointSkipOnce();
+                    }
                 }
 
                 return;
@@ -266,6 +301,29 @@ namespace MOBA.AI
                 $"[MoveState] {context.name} 连续 {context.StagnationDuration:F1} 秒几乎未移动，判定为被卡住，" +
                 "已强制重新下达移动指令。若该警告反复出现，请检查路径点是否被其他单位长期占住、" +
                 "或该点是否落在已烘焙的 NavMesh 上。", context);
+        }
+
+        /// <summary>
+        /// 报告一次"跳过被占住的路径点"。
+        /// 用 Warning 而不是 Log：它表示"发生了本不该发生的事"（节点被长期占住），
+        /// 但系统已自行恢复（跳过去继续推进），因此不需要打断流程，只需要被看见。
+        /// 一次性标记防刷屏：一个单位在一局里可能反复遇到被占住的节点。
+        /// </summary>
+        private void ReportWaypointSkipOnce()
+        {
+            if (hasReportedWaypointSkip)
+            {
+                return;
+            }
+
+            hasReportedWaypointSkip = true;
+
+            Debug.LogWarning(
+                $"[MoveState] {context.name} 的路径点 {currentWaypointIndex} 被长期占住" +
+                $"（连续 {context.WaypointSkipAfterStagnationCycles} 次重新下令仍未移动），已跳过它继续推进。\n" +
+                "  · 为什么这样处理：兵线节点可能落在塔洞两侧的通行带上，被别的单位占住时" +
+                "重下指令毫无作用，不跳过就会永久停在这一站。\n" +
+                "  · 若这条日志频繁出现，说明桥面通行带过窄或单位密度过高，需要调整关卡布局。", context);
         }
     }
 }

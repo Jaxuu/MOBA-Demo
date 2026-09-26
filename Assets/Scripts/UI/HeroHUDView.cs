@@ -8,7 +8,7 @@ using MOBA.Units;
 namespace MOBA.UI
 {
     /// <summary>
-    /// 玩家 HUD（阶段七）：头像 + 生命条 + 法力条 + Q/W 技能槽。
+    /// 玩家 HUD（阶段七）：头像 + 生命条 + 法力条 + 技能槽（阶段八起为 Q / W / E / R 四槽）。
     ///
     /// 职责边界：
     /// 1. 只读英雄的数据（生命 / 法力 / 技能冷却），【不】写任何战斗数值、【不】拦截输入；
@@ -34,8 +34,10 @@ namespace MOBA.UI
         [SerializeField] private Image manaFill;
         [SerializeField] private Text healthText;
         [SerializeField] private Text manaText;
-        [SerializeField] private SkillSlotView qSlot;
-        [SerializeField] private SkillSlotView wSlot;
+
+        [Tooltip("技能槽视图，下标 = (int)SkillSlot（0=Q / 1=W / 2=E / 3=R）。\n" +
+                 "阶段八由 2 槽扩到 4 槽：槽位与按键一一对应，本视图只负责每帧驱动它们的冷却显示。")]
+        [SerializeField] private SkillSlotView[] skillSlots;
 
         [Header("头像配色")]
         [Tooltip("存活时的头像底色。")]
@@ -111,14 +113,15 @@ namespace MOBA.UI
             UIFontProvider.EnsureFont(healthText);
             UIFontProvider.EnsureFont(manaText);
 
-            if (qSlot != null)
+            if (skillSlots != null)
             {
-                qSlot.Bind(skills);
-            }
-
-            if (wSlot != null)
-            {
-                wSlot.Bind(skills);
+                for (int i = 0; i < skillSlots.Length; i++)
+                {
+                    if (skillSlots[i] != null)
+                    {
+                        skillSlots[i].Bind(skills);
+                    }
+                }
             }
 
             // 订阅后主动读一次当前值：英雄可能在 HUD 初始化之前就已经初始化完（甚至已经受过伤），
@@ -150,14 +153,17 @@ namespace MOBA.UI
             // 没有法力组件时传 float.MaxValue：蓝耗判定恒为"够"，不会误染色。
             float currentMana = mana != null ? mana.CurrentMana : float.MaxValue;
 
-            if (qSlot != null)
+            if (skillSlots == null)
             {
-                qSlot.Tick(!isDead, currentMana);
+                return;
             }
 
-            if (wSlot != null)
+            for (int i = 0; i < skillSlots.Length; i++)
             {
-                wSlot.Tick(!isDead, currentMana);
+                if (skillSlots[i] != null)
+                {
+                    skillSlots[i].Tick(!isDead, currentMana);
+                }
             }
         }
 
